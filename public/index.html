@@ -1,0 +1,616 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Texas Hold'em Poker</title>
+    <script src="/socket.io/socket.io.js"></script>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+        
+        body {
+            font-family: 'Arial', sans-serif;
+            background: linear-gradient(135deg, #1e3c72 0%, #2a5298 100%);
+            color: #fff;
+            min-height: 100vh;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+        }
+        
+        .container {
+            width: 100%;
+            max-width: 1400px;
+            padding: 20px;
+        }
+        
+        .screen {
+            display: none;
+        }
+        
+        .screen.active {
+            display: block;
+        }
+        
+        .card {
+            background: rgba(255, 255, 255, 0.1);
+            backdrop-filter: blur(10px);
+            border-radius: 15px;
+            padding: 30px;
+            box-shadow: 0 8px 32px rgba(0, 0, 0, 0.3);
+        }
+        
+        h1, h2 {
+            text-align: center;
+            margin-bottom: 30px;
+            text-shadow: 2px 2px 4px rgba(0, 0, 0, 0.3);
+        }
+        
+        .btn-group {
+            display: flex;
+            gap: 15px;
+            justify-content: center;
+            margin-top: 20px;
+        }
+        
+        button {
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+            border: none;
+            padding: 12px 30px;
+            border-radius: 8px;
+            font-size: 16px;
+            cursor: pointer;
+            transition: transform 0.2s, box-shadow 0.2s;
+            box-shadow: 0 4px 15px rgba(0, 0, 0, 0.2);
+        }
+        
+        button:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 6px 20px rgba(0, 0, 0, 0.3);
+        }
+        
+        button:disabled {
+            opacity: 0.5;
+            cursor: not-allowed;
+            transform: none;
+        }
+        
+        input, select {
+            width: 100%;
+            padding: 12px;
+            margin: 10px 0;
+            border-radius: 8px;
+            border: 2px solid rgba(255, 255, 255, 0.2);
+            background: rgba(255, 255, 255, 0.1);
+            color: white;
+            font-size: 14px;
+        }
+        
+        input::placeholder {
+            color: rgba(255, 255, 255, 0.6);
+        }
+        
+        label {
+            display: block;
+            margin-top: 15px;
+            margin-bottom: 5px;
+            font-weight: bold;
+        }
+        
+        .table-list {
+            display: grid;
+            gap: 15px;
+            margin: 20px 0;
+        }
+        
+        .table-item {
+            background: rgba(255, 255, 255, 0.15);
+            padding: 20px;
+            border-radius: 10px;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            cursor: pointer;
+            transition: background 0.3s;
+        }
+        
+        .table-item:hover {
+            background: rgba(255, 255, 255, 0.25);
+        }
+        
+        .table-info {
+            flex: 1;
+        }
+        
+        .table-info h3 {
+            margin-bottom: 5px;
+        }
+        
+        .table-info p {
+            font-size: 14px;
+            opacity: 0.8;
+        }
+        
+        .poker-table {
+            background: radial-gradient(ellipse at center, #1a5f1a 0%, #0d3f0d 100%);
+            border: 15px solid #8b4513;
+            border-radius: 50%;
+            width: 800px;
+            height: 500px;
+            margin: 0 auto 30px;
+            position: relative;
+            box-shadow: inset 0 0 50px rgba(0, 0, 0, 0.5), 0 10px 30px rgba(0, 0, 0, 0.5);
+        }
+        
+        .player-position {
+            position: absolute;
+            width: 120px;
+            text-align: center;
+        }
+        
+        .player-position.p0 { top: 50%; left: 50%; transform: translate(-50%, -120%); }
+        .player-position.p1 { top: 20%; right: 10%; }
+        .player-position.p2 { top: 50%; right: -5%; transform: translateY(-50%); }
+        .player-position.p3 { bottom: 20%; right: 10%; }
+        .player-position.p4 { top: 50%; left: 50%; transform: translate(-50%, 120%); }
+        .player-position.p5 { bottom: 20%; left: 10%; }
+        .player-position.p6 { top: 50%; left: -5%; transform: translateY(-50%); }
+        .player-position.p7 { top: 20%; left: 10%; }
+        
+        .player-card {
+            background: rgba(0, 0, 0, 0.7);
+            padding: 10px;
+            border-radius: 8px;
+            border: 2px solid #ffd700;
+        }
+        
+        .player-card.folded {
+            opacity: 0.4;
+            border-color: #666;
+        }
+        
+        .player-card.disconnected {
+            border-color: #ff4444;
+            opacity: 0.6;
+        }
+        
+        .player-card h4 {
+            margin-bottom: 5px;
+            font-size: 14px;
+        }
+        
+        .player-card p {
+            font-size: 12px;
+            margin: 3px 0;
+        }
+        
+        .community-cards {
+            position: absolute;
+            top: 50%;
+            left: 50%;
+            transform: translate(-50%, -50%);
+            display: flex;
+            gap: 10px;
+        }
+        
+        .card-visual {
+            width: 60px;
+            height: 85px;
+            background: white;
+            border-radius: 5px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 24px;
+            color: #000;
+            box-shadow: 0 2px 8px rgba(0, 0, 0, 0.3);
+        }
+        
+        .card-visual.hearts, .card-visual.diamonds {
+            color: #d32f2f;
+        }
+        
+        .card-back {
+            background: linear-gradient(45deg, #1976d2, #0d47a1);
+        }
+        
+        .pot-display {
+            position: absolute;
+            top: 35%;
+            left: 50%;
+            transform: translate(-50%, -50%);
+            background: rgba(0, 0, 0, 0.8);
+            padding: 10px 20px;
+            border-radius: 20px;
+            font-size: 18px;
+            font-weight: bold;
+            color: #ffd700;
+        }
+        
+        .player-hand {
+            display: flex;
+            gap: 10px;
+            justify-content: center;
+            margin: 20px 0;
+        }
+        
+        .action-buttons {
+            display: flex;
+            gap: 15px;
+            justify-content: center;
+            flex-wrap: wrap;
+            margin: 20px 0;
+        }
+        
+        .game-info {
+            background: rgba(0, 0, 0, 0.3);
+            padding: 15px;
+            border-radius: 10px;
+            margin: 20px 0;
+        }
+        
+        .game-info p {
+            margin: 5px 0;
+        }
+        
+        .chat-container {
+            background: rgba(0, 0, 0, 0.3);
+            border-radius: 10px;
+            padding: 15px;
+            margin-top: 20px;
+            height: 200px;
+            display: flex;
+            flex-direction: column;
+        }
+        
+        .chat-messages {
+            flex: 1;
+            overflow-y: auto;
+            margin-bottom: 10px;
+            padding: 10px;
+            background: rgba(0, 0, 0, 0.2);
+            border-radius: 5px;
+        }
+        
+        .chat-message {
+            margin: 5px 0;
+            padding: 5px;
+            border-radius: 3px;
+            background: rgba(255, 255, 255, 0.1);
+        }
+        
+        .chat-input-group {
+            display: flex;
+            gap: 10px;
+        }
+        
+        .chat-input-group input {
+            flex: 1;
+            margin: 0;
+        }
+        
+        .chat-input-group button {
+            padding: 12px 20px;
+        }
+        
+        .reactions {
+            display: flex;
+            gap: 10px;
+            justify-content: center;
+            margin: 15px 0;
+        }
+        
+        .reaction-btn {
+            font-size: 24px;
+            padding: 10px 15px;
+            background: rgba(255, 255, 255, 0.1);
+        }
+        
+        .reaction-display {
+            position: fixed;
+            top: 50%;
+            left: 50%;
+            transform: translate(-50%, -50%);
+            font-size: 100px;
+            animation: reactionPop 2s ease-out forwards;
+            pointer-events: none;
+            z-index: 1000;
+        }
+        
+        @keyframes reactionPop {
+            0% {
+                transform: translate(-50%, -50%) scale(0);
+                opacity: 1;
+            }
+            50% {
+                transform: translate(-50%, -50%) scale(1.2);
+            }
+            100% {
+                transform: translate(-50%, -100%) scale(1);
+                opacity: 0;
+            }
+        }
+        
+        .host-controls {
+            background: rgba(255, 215, 0, 0.1);
+            border: 2px solid #ffd700;
+            padding: 15px;
+            border-radius: 10px;
+            margin: 20px 0;
+        }
+        
+        .host-controls h3 {
+            margin-bottom: 15px;
+            color: #ffd700;
+        }
+        
+        .error-message {
+            background: rgba(255, 0, 0, 0.2);
+            border: 2px solid #ff4444;
+            padding: 15px;
+            border-radius: 8px;
+            margin: 15px 0;
+            text-align: center;
+        }
+        
+        .success-message {
+            background: rgba(0, 255, 0, 0.2);
+            border: 2px solid #44ff44;
+            padding: 15px;
+            border-radius: 8px;
+            margin: 15px 0;
+            text-align: center;
+        }
+        
+        .raise-input {
+            display: flex;
+            gap: 10px;
+            align-items: center;
+            justify-content: center;
+            margin: 10px 0;
+        }
+        
+        .raise-input input {
+            width: 150px;
+            margin: 0;
+        }
+        
+        @media (max-width: 900px) {
+            .poker-table {
+                width: 95%;
+                height: 400px;
+            }
+            
+            .player-position {
+                width: 100px;
+            }
+            
+            .card-visual {
+                width: 45px;
+                height: 65px;
+                font-size: 18px;
+            }
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <!-- Main Menu -->
+        <div id="mainMenu" class="screen active">
+            <div class="card">
+                <h1>🃏 Texas Hold'em Poker</h1>
+                <div class="btn-group">
+                    <button onclick="showScreen('hostScreen')">Host a Table</button>
+                    <button onclick="showScreen('joinScreen')">Join a Table</button>
+                </div>
+            </div>
+        </div>
+
+        <!-- Host Table Screen -->
+        <div id="hostScreen" class="screen">
+            <div class="card">
+                <h2>Host a New Table</h2>
+                <form id="hostForm">
+                    <label>Table Name</label>
+                    <input type="text" id="tableName" placeholder="Enter table name" required>
+                    
+                    <label>Password</label>
+                    <input type="password" id="tablePassword" placeholder="Enter password" required>
+                    
+                    <label>Max Players</label>
+                    <select id="maxPlayers">
+                        <option value="2">2</option>
+                        <option value="4">4</option>
+                        <option value="6">6</option>
+                        <option value="8" selected>8</option>
+                    </select>
+                    
+                    <label>Starting Chips</label>
+                    <input type="number" id="startingChips" value="1000" min="100" required>
+                    
+                    <label>Small Blind</label>
+                    <input type="number" id="smallBlind" value="10" min="1" required>
+                    
+                    <label>Big Blind</label>
+                    <input type="number" id="bigBlind" value="20" min="2" required>
+                    
+                    <label>Turn Timer (seconds)</label>
+                    <input type="number" id="turnTimer" value="90" min="10" required>
+                    
+                    <label>Blind Increase</label>
+                    <select id="blindIncrease">
+                        <option value="none">Fixed Blinds</option>
+                        <option value="perElimination">Increase Per Elimination</option>
+                    </select>
+                    
+                    <label>Blind Increase Amount (if enabled)</label>
+                    <input type="number" id="blindIncreaseAmount" value="10" min="0">
+                    
+                    <label>New Player Chips</label>
+                    <select id="newPlayerChips">
+                        <option value="starting">Starting Amount</option>
+                        <option value="lowest">Match Lowest Player</option>
+                    </select>
+                    
+                    <div class="btn-group">
+                        <button type="submit">Create Table</button>
+                        <button type="button" onclick="showScreen('mainMenu')">Back</button>
+                    </div>
+                </form>
+            </div>
+        </div>
+
+        <!-- Join Table Screen -->
+        <div id="joinScreen" class="screen">
+            <div class="card">
+                <h2>Available Tables</h2>
+                <div class="table-list" id="tableList"></div>
+                <div class="btn-group">
+                    <button onclick="loadTables()">Refresh</button>
+                    <button onclick="showScreen('mainMenu')">Back</button>
+                </div>
+            </div>
+        </div>
+
+        <!-- Password Entry Screen -->
+        <div id="passwordScreen" class="screen">
+            <div class="card">
+                <h2>Enter Table Password</h2>
+                <form id="passwordForm">
+                    <input type="password" id="joinPassword" placeholder="Enter password" required>
+                    <div class="btn-group">
+                        <button type="submit">Continue</button>
+                        <button type="button" onclick="showScreen('joinScreen')">Back</button>
+                    </div>
+                </form>
+            </div>
+        </div>
+
+        <!-- Username Entry Screen -->
+        <div id="usernameScreen" class="screen">
+            <div class="card">
+                <h2>Enter Your Username</h2>
+                <form id="usernameForm">
+                    <input type="text" id="username" placeholder="Choose a username" required maxlength="20">
+                    <label>
+                        <input type="checkbox" id="spectatorMode"> Join as Spectator
+                    </label>
+                    <div class="btn-group">
+                        <button type="submit">Join Table</button>
+                        <button type="button" onclick="showScreen('joinScreen')">Back</button>
+                    </div>
+                </form>
+            </div>
+        </div>
+
+        <!-- Game Screen -->
+        <div id="gameScreen" class="screen">
+            <h2 id="gameTitle">Texas Hold'em</h2>
+            
+            <div class="poker-table" id="pokerTable">
+                <div class="pot-display" id="potDisplay">Pot: $0</div>
+                <div class="community-cards" id="communityCards"></div>
+            </div>
+            
+            <div class="game-info">
+                <p><strong>Phase:</strong> <span id="gamePhase">Waiting</span></p>
+                <p><strong>Current Bet:</strong> $<span id="currentBet">0</span></p>
+                <p><strong>Blinds:</strong> $<span id="smallBlindDisplay">0</span> / $<span id="bigBlindDisplay">0</span></p>
+            </div>
+            
+            <div class="player-hand" id="playerHand"></div>
+            
+            <div class="action-buttons" id="actionButtons"></div>
+            
+            <div class="reactions">
+                <button class="reaction-btn" onclick="sendReaction('😊')">😊</button>
+                <button class="reaction-btn" onclick="sendReaction('😢')">😢</button>
+                <button class="reaction-btn" onclick="sendReaction('😠')">😠</button>
+                <button class="reaction-btn" onclick="sendReaction('😡')">😡</button>
+                <button class="reaction-btn" onclick="sendReaction('🤔')">🤔</button>
+                <button class="reaction-btn" onclick="sendReaction('🎉')">🎉</button>
+            </div>
+            
+            <div id="hostControls" class="host-controls" style="display: none;">
+                <h3>Host Controls</h3>
+                <div class="btn-group">
+                    <button id="startGameBtn" onclick="startGame()">Start Game</button>
+                    <button onclick="pauseGame()">Pause/Resume</button>
+                    <button onclick="showScreen('mainMenu')">Leave Table</button>
+                </div>
+            </div>
+            
+            <div class="chat-container">
+                <div class="chat-messages" id="chatMessages"></div>
+                <div class="chat-input-group">
+                    <input type="text" id="chatInput" placeholder="Type a message..." maxlength="200">
+                    <button onclick="sendChat()">Send</button>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        const socket = io();
+        let currentTableId = null;
+        let selectedTableId = null;
+        let gameState = null;
+        
+        // Screen management
+        function showScreen(screenId) {
+            document.querySelectorAll('.screen').forEach(s => s.classList.remove('active'));
+            document.getElementById(screenId).classList.add('active');
+            
+            if (screenId === 'joinScreen') {
+                loadTables();
+            }
+        }
+        
+        // Host table
+        document.getElementById('hostForm').addEventListener('submit', (e) => {
+            e.preventDefault();
+            const settings = {
+                name: document.getElementById('tableName').value,
+                password: document.getElementById('tablePassword').value,
+                maxPlayers: parseInt(document.getElementById('maxPlayers').value),
+                startingChips: parseInt(document.getElementById('startingChips').value),
+                smallBlind: parseInt(document.getElementById('smallBlind').value),
+                bigBlind: parseInt(document.getElementById('bigBlind').value),
+                turnTimer: parseInt(document.getElementById('turnTimer').value),
+                blindIncrease: document.getElementById('blindIncrease').value,
+                blindIncreaseAmount: parseInt(document.getElementById('blindIncreaseAmount').value),
+                newPlayerChips: document.getElementById('newPlayerChips').value
+            };
+            socket.emit('createTable', settings);
+        });
+        
+        socket.on('tableCreated', ({ tableId }) => {
+            currentTableId = tableId;
+            selectedTableId = tableId;
+            showScreen('usernameScreen');
+        });
+        
+        // Load tables
+        function loadTables() {
+            socket.emit('getTables');
+        }
+        
+        socket.on('tableList', (tables) => {
+            const list = document.getElementById('tableList');
+            list.innerHTML = '';
+            
+            if (tables.length === 0) {
+                list.innerHTML = '<p style="text-align: center;">No tables available</p>';
+                return;
+            }
+            
+            tables.forEach(table => {
+                const item = document.createElement('div');
+                item.className = 'table-item';
+                item.innerHTML = `
+               
