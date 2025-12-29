@@ -96,13 +96,18 @@ class PokerHand {
   static checkStraight(values) {
     const unique = [...new Set(values)].sort((a, b) => b - a);
     if (unique.length < 5) return false;
+    
+    // Check for regular straights
     for (let i = 0; i <= unique.length - 5; i++) {
       if (unique[i] - unique[i + 4] === 4) return true;
     }
-    // Check for A-2-3-4-5 straight
-    if (unique.includes(14) && unique.includes(2) && unique.includes(3) && unique.includes(4) && unique.includes(5)) {
+    
+    // Check for A-2-3-4-5 straight (wheel)
+    if (unique.includes(14) && unique.includes(5) && unique.includes(4) && 
+        unique.includes(3) && unique.includes(2)) {
       return true;
     }
+    
     return false;
   }
   
@@ -230,6 +235,7 @@ class Table {
       p.folded = false;
       p.cards = [];
       p.hasActed = false;
+      p.lastAction = null;
     });
     
     // Filter out players with no chips
@@ -255,8 +261,18 @@ class Table {
     this.placeBet(activePlayers[bbIndex], this.bigBlind);
     this.currentBet = this.bigBlind;
     
-    // Set first player to act
+    // Mark blinds as acted (but they can still raise when action comes back to them)
+    activePlayers[sbIndex].hasActed = false;
+    activePlayers[bbIndex].hasActed = false;
+    
+    // Set first player to act (UTG - under the gun, left of big blind)
     this.currentPlayerIndex = (this.dealerIndex + 3) % activePlayers.length;
+    
+    // For heads-up (2 players), dealer is small blind and acts first preflop
+    if (activePlayers.length === 2) {
+      this.currentPlayerIndex = this.dealerIndex;
+    }
+    
     this.startTurnTimer();
   }
   
@@ -340,16 +356,17 @@ class Table {
       return true;
     }
     
-    // Check if all players are all-in except one
+    // Check if all players are all-in except one or none
     const playersWithChips = activePlayers.filter(p => p.chips > 0);
     if (playersWithChips.length <= 1) {
-      // Skip to showdown
+      // Skip to showdown - deal remaining cards
       while (this.gamePhase !== 'showdown' && this.gamePhase !== 'ended') {
         this.players.forEach(p => {
           p.hasActed = false;
           p.bet = 0;
         });
         this.currentBet = 0;
+        this.lastRaiseAmount = 0;
         
         switch (this.gamePhase) {
           case 'preflop':
@@ -373,7 +390,7 @@ class Table {
       return true;
     }
     
-    // Check if betting round is complete
+    // Check if betting round is complete - all players with chips have acted and matched bet
     const playersToAct = activePlayers.filter(p => p.chips > 0 && (!p.hasActed || p.bet < this.currentBet));
     
     if (playersToAct.length === 0) {
@@ -383,6 +400,7 @@ class Table {
         p.bet = 0;
       });
       this.currentBet = 0;
+      this.lastRaiseAmount = 0;
       
       switch (this.gamePhase) {
         case 'preflop':
@@ -403,10 +421,16 @@ class Table {
           return true;
       }
       
-      // Find next player with chips
+      // First player to act after flop/turn/river is first active player left of dealer
       const playersCanAct = activePlayers.filter(p => p.chips > 0);
       if (playersCanAct.length > 0) {
-        this.currentPlayerIndex = activePlayers.indexOf(playersCanAct[0]);
+        for (let i = 1; i <= activePlayers.length; i++) {
+          const idx = (this.dealerIndex + i) % activePlayers.length;
+          if (activePlayers[idx].chips > 0) {
+            this.currentPlayerIndex = idx;
+            break;
+          }
+        }
       }
     } else {
       // Move to next player who can act
