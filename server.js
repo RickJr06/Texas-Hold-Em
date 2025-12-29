@@ -309,7 +309,7 @@ class Table {
   advanceGame() {
     const activePlayers = this.players.filter(p => !p.folded && !p.disconnected && p.chips >= 0);
     
-    // Check if only one player left
+    // Check if only one player left (others folded)
     if (activePlayers.length === 1) {
       this.endRound(activePlayers[0]);
       return true;
@@ -415,6 +415,7 @@ class Table {
       id: this.id,
       name: this.name,
       players: this.players.map(p => ({
+        socketId: p.socketId,
         username: p.username,
         chips: p.chips,
         bet: p.bet,
@@ -432,6 +433,8 @@ class Table {
   getGameState(socketId) {
     const player = this.getPlayer(socketId);
     const isSpectator = this.spectators.some(s => s.socketId === socketId);
+    const activePlayers = this.players.filter(p => !p.folded && !p.disconnected && p.chips >= 0);
+    const currentPlayerSocketId = activePlayers.length > 0 ? activePlayers[this.currentPlayerIndex]?.socketId : null;
     
     return {
       ...this.getPublicState(),
@@ -441,6 +444,7 @@ class Table {
       gamePhase: this.gamePhase,
       dealerIndex: this.dealerIndex,
       currentPlayerIndex: this.currentPlayerIndex,
+      currentPlayerSocketId,
       smallBlind: this.smallBlind,
       bigBlind: this.bigBlind,
       playerCards: player ? player.cards : null,
@@ -480,7 +484,13 @@ io.on('connection', (socket) => {
     if (table.addPlayer(socket.id, username, isSpectator)) {
       socket.join(tableId);
       playerSockets.set(socket.id, tableId);
-      io.to(tableId).emit('gameState', table.getGameState(socket.id));
+      // Send personalized game state to each player
+      table.players.forEach(p => {
+        io.to(p.socketId).emit('gameState', table.getGameState(p.socketId));
+      });
+      table.spectators.forEach(s => {
+        io.to(s.socketId).emit('gameState', table.getGameState(s.socketId));
+      });
       socket.emit('joinedTable', { tableId });
     } else {
       socket.emit('error', 'Table is full');
@@ -492,7 +502,13 @@ io.on('connection', (socket) => {
     const table = tables.get(tableId);
     if (table && table.hostId === socket.id) {
       if (table.startGame()) {
-        io.to(tableId).emit('gameState', table.getGameState(socket.id));
+        // Send personalized game state to each player
+        table.players.forEach(p => {
+          io.to(p.socketId).emit('gameState', table.getGameState(p.socketId));
+        });
+        table.spectators.forEach(s => {
+          io.to(s.socketId).emit('gameState', table.getGameState(s.socketId));
+        });
       }
     }
   });
@@ -501,7 +517,13 @@ io.on('connection', (socket) => {
     const tableId = playerSockets.get(socket.id);
     const table = tables.get(tableId);
     if (table && table.playerAction(socket.id, action, amount)) {
-      io.to(tableId).emit('gameState', table.getGameState(socket.id));
+      // Send personalized game state to each player
+      table.players.forEach(p => {
+        io.to(p.socketId).emit('gameState', table.getGameState(p.socketId));
+      });
+      table.spectators.forEach(s => {
+        io.to(s.socketId).emit('gameState', table.getGameState(s.socketId));
+      });
     }
   });
   
@@ -540,7 +562,13 @@ io.on('connection', (socket) => {
     if (table && table.hostId === socket.id) {
       table.removePlayer(targetSocketId);
       io.to(targetSocketId).emit('kicked');
-      io.to(tableId).emit('gameState', table.getGameState(socket.id));
+      // Send personalized game state to each player
+      table.players.forEach(p => {
+        io.to(p.socketId).emit('gameState', table.getGameState(p.socketId));
+      });
+      table.spectators.forEach(s => {
+        io.to(s.socketId).emit('gameState', table.getGameState(s.socketId));
+      });
     }
   });
   
@@ -551,7 +579,13 @@ io.on('connection', (socket) => {
       table.paused = !table.paused;
       if (table.paused) table.clearTurnTimer();
       else table.startTurnTimer();
-      io.to(tableId).emit('gameState', table.getGameState(socket.id));
+      // Send personalized game state to each player
+      table.players.forEach(p => {
+        io.to(p.socketId).emit('gameState', table.getGameState(p.socketId));
+      });
+      table.spectators.forEach(s => {
+        io.to(s.socketId).emit('gameState', table.getGameState(s.socketId));
+      });
     }
   });
   
@@ -565,14 +599,33 @@ io.on('connection', (socket) => {
         if (player) {
           player.disconnected = true;
           
+          // If host disconnects, close the table
+          if (socket.id === table.hostId) {
+            tables.delete(tableId);
+            io.to(tableId).emit('tableClosed');
+            return;
+          }
+          
           // Set disconnect timer
           const timer = setTimeout(() => {
             table.removePlayer(socket.id);
-            io.to(tableId).emit('gameState', table.getGameState(socket.id));
+            // Send personalized game state to remaining players
+            table.players.forEach(p => {
+              io.to(p.socketId).emit('gameState', table.getGameState(p.socketId));
+            });
+            table.spectators.forEach(s => {
+              io.to(s.socketId).emit('gameState', table.getGameState(s.socketId));
+            });
           }, 300000); // 5 minutes
           
           table.disconnectTimers.set(socket.id, timer);
-          io.to(tableId).emit('gameState', table.getGameState(socket.id));
+          // Send personalized game state to remaining players
+          table.players.forEach(p => {
+            io.to(p.socketId).emit('gameState', table.getGameState(p.socketId));
+          });
+          table.spectators.forEach(s => {
+            io.to(s.socketId).emit('gameState', table.getGameState(s.socketId));
+          });
         }
       }
       playerSockets.delete(socket.id);
