@@ -887,10 +887,12 @@
             // Raise button
             const raiseDiv = document.createElement('div');
             raiseDiv.className = 'raise-input';
-            const minRaise = gameState.currentBet > 0 ? gameState.currentBet * 2 : gameState.bigBlind;
+            // Minimum raise is current bet + size of last raise (or big blind if no prior raises)
+            const minRaise = gameState.currentBet + (gameState.currentBet > gameState.bigBlind ? 
+                             gameState.currentBet - gameState.bigBlind : gameState.bigBlind);
             const maxRaise = myPlayer.chips + myPlayer.bet;
             raiseDiv.innerHTML = `
-                <input type="number" id="raiseAmount" min="${minRaise}" max="${maxRaise}" value="${Math.min(minRaise, maxRaise)}" step="${gameState.bigBlind}">
+                <input type="number" id="raiseAmount" min="${Math.min(minRaise, maxRaise)}" max="${maxRaise}" value="${Math.min(minRaise, maxRaise)}" step="${gameState.bigBlind}">
                 <button onclick="playerAction('raise', parseInt(document.getElementById('raiseAmount').value))">Raise</button>
             `;
             buttonsDiv.appendChild(raiseDiv);
