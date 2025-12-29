@@ -556,10 +556,32 @@
     </div>
 
     <script>
-        const socket = io();
+        // Connect to the server (works for both local and deployed)
+        const socket = io({
+            transports: ['websocket', 'polling'],
+            reconnection: true,
+            reconnectionDelay: 1000,
+            reconnectionDelayMax: 5000,
+            reconnectionAttempts: 5
+        });
+        
         let currentTableId = null;
         let selectedTableId = null;
         let gameState = null;
+        
+        // Connection status logging
+        socket.on('connect', () => {
+            console.log('Connected to server!');
+        });
+        
+        socket.on('connect_error', (error) => {
+            console.error('Connection error:', error);
+            alert('Cannot connect to server. Please refresh the page.');
+        });
+        
+        socket.on('disconnect', () => {
+            console.log('Disconnected from server');
+        });
         
         // Screen management
         function showScreen(screenId) {
@@ -613,4 +635,227 @@
                 const item = document.createElement('div');
                 item.className = 'table-item';
                 item.innerHTML = `
-               
+                    <div class="table-info">
+                        <h3>${table.name}</h3>
+                        <p>Players: ${table.players.length}/${table.maxPlayers} | ${table.gameStarted ? 'In Progress' : 'Waiting'}</p>
+                    </div>
+                `;
+                item.onclick = () => selectTable(table.id);
+                list.appendChild(item);
+            });
+        });
+        
+        function selectTable(tableId) {
+            selectedTableId = tableId;
+            showScreen('passwordScreen');
+        }
+        
+        // Password entry
+        document.getElementById('passwordForm').addEventListener('submit', (e) => {
+            e.preventDefault();
+            showScreen('usernameScreen');
+        });
+        
+        // Username entry and join
+        document.getElementById('usernameForm').addEventListener('submit', (e) => {
+            e.preventDefault();
+            const username = document.getElementById('username').value;
+            const password = document.getElementById('joinPassword').value || document.getElementById('tablePassword').value;
+            const isSpectator = document.getElementById('spectatorMode').checked;
+            
+            socket.emit('joinTable', {
+                tableId: selectedTableId,
+                password,
+                username,
+                isSpectator
+            });
+        });
+        
+        socket.on('joinedTable', ({ tableId }) => {
+            currentTableId = tableId;
+            showScreen('gameScreen');
+        });
+        
+        // Game state updates
+        socket.on('gameState', (state) => {
+            gameState = state;
+            updateGameDisplay();
+        });
+        
+        function updateGameDisplay() {
+            if (!gameState) return;
+            
+            // Update pot
+            document.getElementById('potDisplay').textContent = `Pot: $${gameState.pot}`;
+            
+            // Update game info
+            document.getElementById('gamePhase').textContent = gameState.gamePhase;
+            document.getElementById('currentBet').textContent = gameState.currentBet;
+            document.getElementById('smallBlindDisplay').textContent = gameState.smallBlind;
+            document.getElementById('bigBlindDisplay').textContent = gameState.bigBlind;
+            
+            // Update community cards
+            const communityCardsDiv = document.getElementById('communityCards');
+            communityCardsDiv.innerHTML = '';
+            gameState.communityCards.forEach(card => {
+                const cardDiv = document.createElement('div');
+                cardDiv.className = `card-visual ${card.suit}`;
+                cardDiv.textContent = getCardDisplay(card);
+                communityCardsDiv.appendChild(cardDiv);
+            });
+            
+            // Update player hand
+            const playerHandDiv = document.getElementById('playerHand');
+            playerHandDiv.innerHTML = '';
+            if (gameState.playerCards && gameState.playerCards.length > 0) {
+                gameState.playerCards.forEach(card => {
+                    const cardDiv = document.createElement('div');
+                    cardDiv.className = `card-visual ${card.suit}`;
+                    cardDiv.textContent = getCardDisplay(card);
+                    playerHandDiv.appendChild(cardDiv);
+                });
+            }
+            
+            // Update players on table
+            const table = document.getElementById('pokerTable');
+            const existingPlayers = table.querySelectorAll('.player-position');
+            existingPlayers.forEach(p => p.remove());
+            
+            gameState.players.forEach((player, index) => {
+                const playerDiv = document.createElement('div');
+                playerDiv.className = `player-position p${index}`;
+                playerDiv.innerHTML = `
+                    <div class="player-card ${player.folded ? 'folded' : ''} ${player.disconnected ? 'disconnected' : ''}">
+                        <h4>${player.username}</h4>
+                        <p>💰 $${player.chips}</p>
+                        <p>Bet: $${player.bet}</p>
+                        ${index === gameState.dealerIndex ? '<p>🎰 Dealer</p>' : ''}
+                        ${index === gameState.currentPlayerIndex && gameState.gameStarted ? '<p>⏰ Turn</p>' : ''}
+                    </div>
+                `;
+                table.appendChild(playerDiv);
+            });
+            
+            // Update action buttons
+            updateActionButtons();
+            
+            // Update host controls
+            if (gameState.isHost) {
+                document.getElementById('hostControls').style.display = 'block';
+                document.getElementById('startGameBtn').disabled = gameState.gameStarted;
+            }
+        }
+        
+        function updateActionButtons() {
+            const buttonsDiv = document.getElementById('actionButtons');
+            buttonsDiv.innerHTML = '';
+            
+            if (!gameState.gameStarted || gameState.isSpectator || gameState.paused) return;
+            
+            const myPlayer = gameState.players.find(p => p.username === document.getElementById('username').value);
+            if (!myPlayer || myPlayer.folded) return;
+            
+            const activePlayers = gameState.players.filter(p => !p.folded && !p.disconnected);
+            const isMyTurn = activePlayers[gameState.currentPlayerIndex]?.username === myPlayer.username;
+            
+            if (!isMyTurn) return;
+            
+            // Fold button
+            const foldBtn = document.createElement('button');
+            foldBtn.textContent = 'Fold';
+            foldBtn.onclick = () => playerAction('fold');
+            buttonsDiv.appendChild(foldBtn);
+            
+            // Check/Call button
+            if (myPlayer.bet < gameState.currentBet) {
+                const callAmount = gameState.currentBet - myPlayer.bet;
+                const callBtn = document.createElement('button');
+                callBtn.textContent = `Call $${callAmount}`;
+                callBtn.onclick = () => playerAction('call');
+                callBtn.disabled = callAmount > myPlayer.chips;
+                buttonsDiv.appendChild(callBtn);
+            } else {
+                const checkBtn = document.createElement('button');
+                checkBtn.textContent = 'Check';
+                checkBtn.onclick = () => playerAction('check');
+                buttonsDiv.appendChild(checkBtn);
+            }
+            
+            // Raise button
+            const raiseDiv = document.createElement('div');
+            raiseDiv.className = 'raise-input';
+            raiseDiv.innerHTML = `
+                <input type="number" id="raiseAmount" min="${gameState.currentBet * 2}" max="${myPlayer.chips + myPlayer.bet}" value="${gameState.currentBet * 2}">
+                <button onclick="playerAction('raise', parseInt(document.getElementById('raiseAmount').value))">Raise</button>
+            `;
+            buttonsDiv.appendChild(raiseDiv);
+        }
+        
+        function getCardDisplay(card) {
+            const suits = { hearts: '♥', diamonds: '♦', clubs: '♣', spades: '♠' };
+            const values = { 11: 'J', 12: 'Q', 13: 'K', 14: 'A' };
+            const valueStr = values[card.value] || card.value.toString();
+            return valueStr + suits[card.suit];
+        }
+        
+        // Player actions
+        function playerAction(action, amount) {
+            socket.emit('playerAction', { action, amount });
+        }
+        
+        function startGame() {
+            socket.emit('startGame');
+        }
+        
+        function pauseGame() {
+            socket.emit('pauseGame');
+        }
+        
+        // Chat
+        function sendChat() {
+            const input = document.getElementById('chatInput');
+            const message = input.value.trim();
+            if (message) {
+                socket.emit('chat', message);
+                input.value = '';
+            }
+        }
+        
+        document.getElementById('chatInput').addEventListener('keypress', (e) => {
+            if (e.key === 'Enter') sendChat();
+        });
+        
+        socket.on('chatMessage', ({ username, message, timestamp }) => {
+            const messagesDiv = document.getElementById('chatMessages');
+            const msgDiv = document.createElement('div');
+            msgDiv.className = 'chat-message';
+            msgDiv.innerHTML = `<strong>${username}:</strong> ${message}`;
+            messagesDiv.appendChild(msgDiv);
+            messagesDiv.scrollTop = messagesDiv.scrollHeight;
+        });
+        
+        // Reactions
+        function sendReaction(emoji) {
+            socket.emit('reaction', emoji);
+        }
+        
+        socket.on('playerReaction', ({ username, emoji }) => {
+            const reactionDiv = document.createElement('div');
+            reactionDiv.className = 'reaction-display';
+            reactionDiv.textContent = emoji;
+            document.body.appendChild(reactionDiv);
+            setTimeout(() => reactionDiv.remove(), 2000);
+        });
+        
+        // Error handling
+        socket.on('error', (message) => {
+            alert(message);
+        });
+        
+        socket.on('kicked', () => {
+            alert('You have been kicked from the table');
+            showScreen('mainMenu');
+        });
+    </script>
+</body>
+</html>
