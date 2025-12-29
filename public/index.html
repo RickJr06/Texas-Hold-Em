@@ -149,24 +149,41 @@
         
         .player-position {
             position: absolute;
-            width: 120px;
+            width: 140px;
             text-align: center;
+            transition: all 0.3s ease;
         }
         
-        .player-position.p0 { top: 50%; left: 50%; transform: translate(-50%, -120%); }
-        .player-position.p1 { top: 20%; right: 10%; }
-        .player-position.p2 { top: 50%; right: -5%; transform: translateY(-50%); }
-        .player-position.p3 { bottom: 20%; right: 10%; }
-        .player-position.p4 { top: 50%; left: 50%; transform: translate(-50%, 120%); }
-        .player-position.p5 { bottom: 20%; left: 10%; }
-        .player-position.p6 { top: 50%; left: -5%; transform: translateY(-50%); }
-        .player-position.p7 { top: 20%; left: 10%; }
+        .player-position.p0 { top: 10%; left: 50%; transform: translateX(-50%); }
+        .player-position.p1 { top: 20%; right: 5%; }
+        .player-position.p2 { top: 50%; right: -2%; transform: translateY(-50%); }
+        .player-position.p3 { bottom: 15%; right: 5%; }
+        .player-position.p4 { bottom: 5%; left: 50%; transform: translateX(-50%); }
+        .player-position.p5 { bottom: 15%; left: 5%; }
+        .player-position.p6 { top: 50%; left: -2%; transform: translateY(-50%); }
+        .player-position.p7 { top: 20%; left: 5%; }
         
         .player-card {
             background: rgba(0, 0, 0, 0.7);
             padding: 10px;
             border-radius: 8px;
             border: 2px solid #ffd700;
+            transition: all 0.3s ease;
+        }
+        
+        .player-card.active-turn {
+            border-color: #00ff00;
+            box-shadow: 0 0 20px rgba(0, 255, 0, 0.6);
+            animation: pulse 1.5s infinite;
+        }
+        
+        @keyframes pulse {
+            0%, 100% {
+                box-shadow: 0 0 20px rgba(0, 255, 0, 0.6);
+            }
+            50% {
+                box-shadow: 0 0 30px rgba(0, 255, 0, 0.9);
+            }
         }
         
         .player-card.folded {
@@ -209,6 +226,18 @@
             font-size: 24px;
             color: #000;
             box-shadow: 0 2px 8px rgba(0, 0, 0, 0.3);
+            animation: cardDeal 0.3s ease;
+        }
+        
+        @keyframes cardDeal {
+            from {
+                opacity: 0;
+                transform: translateY(-50px) rotateY(90deg);
+            }
+            to {
+                opacity: 1;
+                transform: translateY(0) rotateY(0);
+            }
         }
         
         .card-visual.hearts, .card-visual.diamonds {
@@ -252,10 +281,31 @@
             padding: 15px;
             border-radius: 10px;
             margin: 20px 0;
+            text-align: center;
         }
         
         .game-info p {
             margin: 5px 0;
+            font-size: 18px;
+        }
+        
+        .game-phase {
+            font-size: 24px;
+            font-weight: bold;
+            color: #ffd700;
+            text-transform: uppercase;
+            animation: phaseAppear 0.5s ease;
+        }
+        
+        @keyframes phaseAppear {
+            from {
+                opacity: 0;
+                transform: scale(0.8);
+            }
+            to {
+                opacity: 1;
+                transform: scale(1);
+            }
         }
         
         .chat-container {
@@ -518,9 +568,8 @@
             </div>
             
             <div class="game-info">
-                <p><strong>Phase:</strong> <span id="gamePhase">Waiting</span></p>
-                <p><strong>Current Bet:</strong> $<span id="currentBet">0</span></p>
-                <p><strong>Blinds:</strong> $<span id="smallBlindDisplay">0</span> / $<span id="bigBlindDisplay">0</span></p>
+                <p class="game-phase" id="gamePhase">Waiting for players...</p>
+                <p><strong>Current Bet:</strong> $<span id="currentBet">0</span> | <strong>Blinds:</strong> $<span id="smallBlindDisplay">0</span>/$<span id="bigBlindDisplay">0</span></p>
             </div>
             
             <div class="player-hand" id="playerHand"></div>
@@ -686,10 +735,19 @@
             if (!gameState) return;
             
             // Update pot
-            document.getElementById('potDisplay').textContent = `Pot: $${gameState.pot}`;
+            document.getElementById('potDisplay').textContent = `Pot: ${gameState.pot}`;
             
-            // Update game info
-            document.getElementById('gamePhase').textContent = gameState.gamePhase;
+            // Update game info with better phase names
+            const phaseNames = {
+                'waiting': 'Waiting for players...',
+                'preflop': '🎴 PRE-FLOP',
+                'flop': '🃏 FLOP',
+                'turn': '🎯 TURN', 
+                'river': '🌊 RIVER',
+                'showdown': '🏆 SHOWDOWN',
+                'ended': '🎉 GAME OVER'
+            };
+            document.getElementById('gamePhase').textContent = phaseNames[gameState.gamePhase] || gameState.gamePhase;
             document.getElementById('currentBet').textContent = gameState.currentBet;
             document.getElementById('smallBlindDisplay').textContent = gameState.smallBlind;
             document.getElementById('bigBlindDisplay').textContent = gameState.bigBlind;
@@ -722,15 +780,16 @@
             existingPlayers.forEach(p => p.remove());
             
             gameState.players.forEach((player, index) => {
+                const isCurrentTurn = player.socketId === gameState.currentPlayerSocketId && gameState.gameStarted && !gameState.paused;
                 const playerDiv = document.createElement('div');
                 playerDiv.className = `player-position p${index}`;
                 playerDiv.innerHTML = `
-                    <div class="player-card ${player.folded ? 'folded' : ''} ${player.disconnected ? 'disconnected' : ''}">
-                        <h4>${player.username}</h4>
-                        <p>💰 $${player.chips}</p>
-                        <p>Bet: $${player.bet}</p>
-                        ${index === gameState.dealerIndex ? '<p>🎰 Dealer</p>' : ''}
-                        ${index === gameState.currentPlayerIndex && gameState.gameStarted ? '<p>⏰ Turn</p>' : ''}
+                    <div class="player-card ${player.folded ? 'folded' : ''} ${player.disconnected ? 'disconnected' : ''} ${isCurrentTurn ? 'active-turn' : ''}">
+                        <h4>${player.username}${index === gameState.dealerIndex ? ' 🎰' : ''}</h4>
+                        <p>💰 ${player.chips}</p>
+                        ${player.bet > 0 ? `<p>Bet: ${player.bet}</p>` : ''}
+                        ${isCurrentTurn ? '<p style="color: #00ff00;">⏰ YOUR TURN</p>' : ''}
+                        ${player.folded ? '<p style="color: #ff4444;">FOLDED</p>' : ''}
                     </div>
                 `;
                 table.appendChild(playerDiv);
@@ -850,6 +909,11 @@
         // Error handling
         socket.on('error', (message) => {
             alert(message);
+        });
+        
+        socket.on('tableClosed', () => {
+            alert('The host has closed the table');
+            showScreen('mainMenu');
         });
         
         socket.on('kicked', () => {
