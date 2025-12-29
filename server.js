@@ -273,26 +273,40 @@ class Table {
     if (!player || player.folded || this.paused) return false;
     
     const activePlayers = this.players.filter(p => p.chips > 0 && !p.folded && !p.disconnected);
-    if (activePlayers[this.currentPlayerIndex].socketId !== socketId) return false;
+    const currentPlayer = activePlayers[this.currentPlayerIndex];
+    if (!currentPlayer || currentPlayer.socketId !== socketId) return false;
     
     this.clearTurnTimer();
+    
+    let actionMessage = '';
     
     switch (action) {
       case 'fold':
         player.folded = true;
+        actionMessage = `${player.username} folded`;
         break;
       case 'check':
         if (player.bet < this.currentBet) return false;
+        actionMessage = `${player.username} checked`;
         break;
       case 'call':
-        const callAmount = this.currentBet - player.bet;
+        const callAmount = Math.min(this.currentBet - player.bet, player.chips);
         this.placeBet(player, callAmount);
+        actionMessage = `${player.username} called ${callAmount}`;
         break;
       case 'raise':
+        // Validate raise amount
+        if (amount > player.chips + player.bet) return false;
+        if (amount < this.currentBet * 2 && player.chips + player.bet > this.currentBet * 2) return false;
+        
         const raiseAmount = amount - player.bet;
-        if (raiseAmount <= 0 || amount < this.currentBet * 2) return false;
+        if (raiseAmount <= 0) return false;
+        
+        const oldBet = this.currentBet;
         this.placeBet(player, raiseAmount);
         this.currentBet = amount;
+        actionMessage = `${player.username} raised from ${oldBet} to ${amount}`;
+        
         // Reset hasActed for all other players
         this.players.forEach(p => {
           if (p.socketId !== socketId) p.hasActed = false;
@@ -303,20 +317,64 @@ class Table {
     }
     
     player.hasActed = true;
+    player.lastAction = action;
+    
+    // Broadcast action to all players
+    this.broadcastAction(actionMessage);
+    
     return this.advanceGame();
+  }
+  
+  broadcastAction(message) {
+    this.actionLog = this.actionLog || [];
+    this.actionLog.push(message);
   }
   
   advanceGame() {
     const activePlayers = this.players.filter(p => !p.folded && !p.disconnected && p.chips >= 0);
     
-    // Check if only one player left (others folded)
-    if (activePlayers.length === 1) {
-      this.endRound(activePlayers[0]);
+    // Check if only one player left not folded
+    const playersNotFolded = this.players.filter(p => !p.folded && !p.disconnected);
+    if (playersNotFolded.length === 1) {
+      this.endRound(playersNotFolded[0]);
+      return true;
+    }
+    
+    // Check if all players are all-in except one
+    const playersWithChips = activePlayers.filter(p => p.chips > 0);
+    if (playersWithChips.length <= 1) {
+      // Skip to showdown
+      while (this.gamePhase !== 'showdown' && this.gamePhase !== 'ended') {
+        this.players.forEach(p => {
+          p.hasActed = false;
+          p.bet = 0;
+        });
+        this.currentBet = 0;
+        
+        switch (this.gamePhase) {
+          case 'preflop':
+            this.gamePhase = 'flop';
+            this.communityCards.push(this.deck.deal(), this.deck.deal(), this.deck.deal());
+            break;
+          case 'flop':
+            this.gamePhase = 'turn';
+            this.communityCards.push(this.deck.deal());
+            break;
+          case 'turn':
+            this.gamePhase = 'river';
+            this.communityCards.push(this.deck.deal());
+            break;
+          case 'river':
+            this.gamePhase = 'showdown';
+            this.determineWinner();
+            return true;
+        }
+      }
       return true;
     }
     
     // Check if betting round is complete
-    const playersToAct = activePlayers.filter(p => !p.hasActed || p.bet < this.currentBet);
+    const playersToAct = activePlayers.filter(p => p.chips > 0 && (!p.hasActed || p.bet < this.currentBet));
     
     if (playersToAct.length === 0) {
       // Move to next phase
@@ -345,12 +403,22 @@ class Table {
           return true;
       }
       
-      this.currentPlayerIndex = (this.dealerIndex + 1) % activePlayers.length;
+      // Find next player with chips
+      const playersCanAct = activePlayers.filter(p => p.chips > 0);
+      if (playersCanAct.length > 0) {
+        this.currentPlayerIndex = activePlayers.indexOf(playersCanAct[0]);
+      }
     } else {
-      // Move to next player
+      // Move to next player who can act
+      let attempts = 0;
       do {
         this.currentPlayerIndex = (this.currentPlayerIndex + 1) % activePlayers.length;
-      } while (activePlayers[this.currentPlayerIndex].folded || activePlayers[this.currentPlayerIndex].hasActed);
+        attempts++;
+      } while (attempts < activePlayers.length && 
+               (activePlayers[this.currentPlayerIndex].folded || 
+                activePlayers[this.currentPlayerIndex].chips === 0 ||
+                (activePlayers[this.currentPlayerIndex].hasActed && 
+                 activePlayers[this.currentPlayerIndex].bet >= this.currentBet)));
     }
     
     this.startTurnTimer();
@@ -421,7 +489,8 @@ class Table {
         bet: p.bet,
         folded: p.folded,
         active: p.active,
-        disconnected: p.disconnected
+        disconnected: p.disconnected,
+        lastAction: p.lastAction
       })),
       spectatorCount: this.spectators.length,
       gameStarted: this.gameStarted,
@@ -449,7 +518,8 @@ class Table {
       bigBlind: this.bigBlind,
       playerCards: player ? player.cards : null,
       isHost: socketId === this.hostId,
-      isSpectator
+      isSpectator,
+      actionLog: this.actionLog || []
     };
   }
 }
