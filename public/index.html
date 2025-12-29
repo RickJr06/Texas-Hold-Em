@@ -362,27 +362,59 @@
         }
         
         .reaction-display {
-            position: fixed;
-            top: 50%;
-            left: 50%;
-            transform: translate(-50%, -50%);
-            font-size: 100px;
-            animation: reactionPop 2s ease-out forwards;
+            position: absolute;
+            font-size: 40px;
+            animation: reactionFloat 2s ease-out forwards;
             pointer-events: none;
             z-index: 1000;
         }
         
-        @keyframes reactionPop {
+        @keyframes reactionFloat {
             0% {
-                transform: translate(-50%, -50%) scale(0);
                 opacity: 1;
-            }
-            50% {
-                transform: translate(-50%, -50%) scale(1.2);
+                transform: translateY(0) scale(1);
             }
             100% {
-                transform: translate(-50%, -100%) scale(1);
                 opacity: 0;
+                transform: translateY(-80px) scale(1.5);
+            }
+        }
+        
+        .action-indicator {
+            position: absolute;
+            top: -30px;
+            left: 50%;
+            transform: translateX(-50%);
+            background: rgba(0, 0, 0, 0.9);
+            padding: 5px 10px;
+            border-radius: 5px;
+            font-size: 12px;
+            font-weight: bold;
+            white-space: nowrap;
+            animation: actionPop 2s ease-out forwards;
+        }
+        
+        .action-indicator.fold { color: #ff4444; }
+        .action-indicator.call { color: #4444ff; }
+        .action-indicator.raise { color: #ff8800; }
+        .action-indicator.check { color: #44ff44; }
+        
+        @keyframes actionPop {
+            0% {
+                opacity: 0;
+                transform: translateX(-50%) translateY(10px) scale(0.8);
+            }
+            10% {
+                opacity: 1;
+                transform: translateX(-50%) translateY(0) scale(1);
+            }
+            90% {
+                opacity: 1;
+                transform: translateX(-50%) translateY(0) scale(1);
+            }
+            100% {
+                opacity: 0;
+                transform: translateX(-50%) translateY(-10px) scale(0.8);
             }
         }
         
@@ -617,6 +649,8 @@
         let currentTableId = null;
         let selectedTableId = null;
         let gameState = null;
+        let reactionCooldown = false;
+        let lastActionLog = [];
         
         // Connection status logging
         socket.on('connect', () => {
@@ -727,8 +761,18 @@
         
         // Game state updates
         socket.on('gameState', (state) => {
+            const oldState = gameState;
             gameState = state;
             updateGameDisplay();
+            
+            // Show action logs in chat
+            if (gameState.actionLog && oldState) {
+                const newActions = gameState.actionLog.slice(lastActionLog.length);
+                newActions.forEach(action => {
+                    addSystemMessage(action);
+                });
+                lastActionLog = [...gameState.actionLog];
+            }
         });
         
         function updateGameDisplay() {
@@ -843,8 +887,10 @@
             // Raise button
             const raiseDiv = document.createElement('div');
             raiseDiv.className = 'raise-input';
+            const minRaise = gameState.currentBet > 0 ? gameState.currentBet * 2 : gameState.bigBlind;
+            const maxRaise = myPlayer.chips + myPlayer.bet;
             raiseDiv.innerHTML = `
-                <input type="number" id="raiseAmount" min="${gameState.currentBet * 2}" max="${myPlayer.chips + myPlayer.bet}" value="${gameState.currentBet * 2}">
+                <input type="number" id="raiseAmount" min="${minRaise}" max="${maxRaise}" value="${Math.min(minRaise, maxRaise)}" step="${gameState.bigBlind}">
                 <button onclick="playerAction('raise', parseInt(document.getElementById('raiseAmount').value))">Raise</button>
             `;
             buttonsDiv.appendChild(raiseDiv);
@@ -893,15 +939,43 @@
             messagesDiv.scrollTop = messagesDiv.scrollHeight;
         });
         
+        function addSystemMessage(message) {
+            const messagesDiv = document.getElementById('chatMessages');
+            const msgDiv = document.createElement('div');
+            msgDiv.className = 'chat-message';
+            msgDiv.style.fontStyle = 'italic';
+            msgDiv.style.color = '#ffd700';
+            msgDiv.textContent = message;
+            messagesDiv.appendChild(msgDiv);
+            messagesDiv.scrollTop = messagesDiv.scrollHeight;
+        }
+        
         // Reactions
         function sendReaction(emoji) {
+            if (reactionCooldown) return;
+            
+            reactionCooldown = true;
+            setTimeout(() => {
+                reactionCooldown = false;
+            }, 2000); // 2 second cooldown
+            
             socket.emit('reaction', emoji);
         }
         
         socket.on('playerReaction', ({ username, emoji }) => {
+            // Find the player's position on the table
+            const player = gameState?.players.find(p => p.username === username);
+            if (!player) return;
+            
+            const playerDiv = document.getElementById(`player-${player.socketId}`);
+            if (!playerDiv) return;
+            
+            const rect = playerDiv.getBoundingClientRect();
             const reactionDiv = document.createElement('div');
             reactionDiv.className = 'reaction-display';
             reactionDiv.textContent = emoji;
+            reactionDiv.style.left = rect.left + rect.width / 2 + 'px';
+            reactionDiv.style.top = rect.top + 'px';
             document.body.appendChild(reactionDiv);
             setTimeout(() => reactionDiv.remove(), 2000);
         });
