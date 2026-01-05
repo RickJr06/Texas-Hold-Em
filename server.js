@@ -228,8 +228,16 @@ class Table {
     this.pot = 0;
     this.currentBet = 0;
     this.gamePhase = 'preflop';
+    this.lastRaiseAmount = 0;
     
-    // Reset players
+    // Get list of active players (has chips, not disconnected) BEFORE resetting
+    const activePlayers = this.players.filter(p => p.chips > 0 && !p.disconnected);
+    if (activePlayers.length < 2) {
+      this.gamePhase = 'ended';
+      return;
+    }
+    
+    // Reset player states
     this.players.forEach(p => {
       p.bet = 0;
       p.folded = false;
@@ -238,41 +246,40 @@ class Table {
       p.lastAction = null;
     });
     
-    // Filter out players with no chips
-    const activePlayers = this.players.filter(p => p.chips > 0 && !p.disconnected);
-    if (activePlayers.length < 2) {
-      this.gamePhase = 'ended';
-      return;
-    }
+    // Find current dealer in active players list
+    let dealerInActive = activePlayers.findIndex(p => p.socketId === this.players[this.dealerIndex]?.socketId);
+    if (dealerInActive === -1) dealerInActive = 0;
     
-    // Move dealer button
-    this.dealerIndex = (this.dealerIndex + 1) % activePlayers.length;
+    // Move dealer to next active player
+    dealerInActive = (dealerInActive + 1) % activePlayers.length;
     
-    // Deal cards
+    // Update global dealer index to match
+    this.dealerIndex = this.players.findIndex(p => p.socketId === activePlayers[dealerInActive].socketId);
+    
+    // Deal cards to active players only
     activePlayers.forEach(p => {
       p.cards = [this.deck.deal(), this.deck.deal()];
     });
     
     // Post blinds
-    const sbIndex = (this.dealerIndex + 1) % activePlayers.length;
-    const bbIndex = (this.dealerIndex + 2) % activePlayers.length;
+    const sbPlayer = activePlayers[(dealerInActive + 1) % activePlayers.length];
+    const bbPlayer = activePlayers[(dealerInActive + 2) % activePlayers.length];
     
-    this.placeBet(activePlayers[sbIndex], this.smallBlind);
-    this.placeBet(activePlayers[bbIndex], this.bigBlind);
+    this.placeBet(sbPlayer, this.smallBlind);
+    this.placeBet(bbPlayer, this.bigBlind);
     this.currentBet = this.bigBlind;
     
-    // Mark blinds as acted (but they can still raise when action comes back to them)
-    activePlayers[sbIndex].hasActed = false;
-    activePlayers[bbIndex].hasActed = false;
-    
-    // Set first player to act (UTG - under the gun, left of big blind)
-    this.currentPlayerIndex = (this.dealerIndex + 3) % activePlayers.length;
-    
-    // For heads-up (2 players), dealer is small blind and acts first preflop
+    // Set first player to act
+    let firstToAct;
     if (activePlayers.length === 2) {
-      this.currentPlayerIndex = this.dealerIndex;
+      // Heads-up: dealer (small blind) acts first preflop
+      firstToAct = activePlayers[dealerInActive];
+    } else {
+      // Multi-way: UTG (left of big blind) acts first
+      firstToAct = activePlayers[(dealerInActive + 3) % activePlayers.length];
     }
     
+    this.currentPlayerIndex = this.players.findIndex(p => p.socketId === firstToAct.socketId);
     this.startTurnTimer();
   }
   
@@ -347,10 +354,12 @@ class Table {
   }
   
   advanceGame() {
-    const activePlayers = this.players.filter(p => !p.folded && !p.disconnected && p.chips >= 0);
+    // Work with full player list indices, but only consider active players
+    const allPlayers = this.players;
+    const activePlayers = allPlayers.filter(p => !p.folded && !p.disconnected && p.chips >= 0);
     
     // Check if only one player left not folded
-    const playersNotFolded = this.players.filter(p => !p.folded && !p.disconnected);
+    const playersNotFolded = allPlayers.filter(p => !p.folded && !p.disconnected);
     if (playersNotFolded.length === 1) {
       this.endRound(playersNotFolded[0]);
       return true;
@@ -361,7 +370,7 @@ class Table {
     if (playersWithChips.length <= 1) {
       // Skip to showdown - deal remaining cards
       while (this.gamePhase !== 'showdown' && this.gamePhase !== 'ended') {
-        this.players.forEach(p => {
+        allPlayers.forEach(p => {
           p.hasActed = false;
           p.bet = 0;
         });
@@ -390,12 +399,12 @@ class Table {
       return true;
     }
     
-    // Check if betting round is complete - all players with chips have acted and matched bet
+    // Check if betting round is complete
     const playersToAct = activePlayers.filter(p => p.chips > 0 && (!p.hasActed || p.bet < this.currentBet));
     
     if (playersToAct.length === 0) {
       // Move to next phase
-      this.players.forEach(p => {
+      allPlayers.forEach(p => {
         p.hasActed = false;
         p.bet = 0;
       });
@@ -421,28 +430,31 @@ class Table {
           return true;
       }
       
-      // First player to act after flop/turn/river is first active player left of dealer
-      const playersCanAct = activePlayers.filter(p => p.chips > 0);
-      if (playersCanAct.length > 0) {
-        for (let i = 1; i <= activePlayers.length; i++) {
-          const idx = (this.dealerIndex + i) % activePlayers.length;
-          if (activePlayers[idx].chips > 0) {
-            this.currentPlayerIndex = idx;
-            break;
-          }
+      // First player to act is first active player left of dealer
+      for (let i = 1; i <= allPlayers.length; i++) {
+        const idx = (this.dealerIndex + i) % allPlayers.length;
+        const player = allPlayers[idx];
+        if (!player.folded && !player.disconnected && player.chips > 0) {
+          this.currentPlayerIndex = idx;
+          break;
         }
       }
     } else {
       // Move to next player who can act
       let attempts = 0;
+      const startIdx = this.currentPlayerIndex;
       do {
-        this.currentPlayerIndex = (this.currentPlayerIndex + 1) % activePlayers.length;
+        this.currentPlayerIndex = (this.currentPlayerIndex + 1) % allPlayers.length;
         attempts++;
-      } while (attempts < activePlayers.length && 
-               (activePlayers[this.currentPlayerIndex].folded || 
-                activePlayers[this.currentPlayerIndex].chips === 0 ||
-                (activePlayers[this.currentPlayerIndex].hasActed && 
-                 activePlayers[this.currentPlayerIndex].bet >= this.currentBet)));
+        const currentPlayer = allPlayers[this.currentPlayerIndex];
+        
+        // Found a valid player
+        if (!currentPlayer.folded && !currentPlayer.disconnected && 
+            currentPlayer.chips > 0 && 
+            (!currentPlayer.hasActed || currentPlayer.bet < this.currentBet)) {
+          break;
+        }
+      } while (attempts < allPlayers.length);
     }
     
     this.startTurnTimer();
@@ -465,22 +477,48 @@ class Table {
   
   endRound(winner) {
     winner.chips += this.pot;
+    this.broadcastAction(`${winner.username} wins ${this.pot}!`);
+    
+    // Clear action log for next round
+    this.actionLog = [];
     
     // Check for blind increase
-    if (this.blindIncrease === 'perElimination') {
-      const eliminatedPlayers = this.players.filter(p => p.chips === 0);
-      if (eliminatedPlayers.length > 0) {
-        this.smallBlind += this.blindIncreaseAmount;
-        this.bigBlind += this.blindIncreaseAmount * 2;
-      }
+    const eliminatedPlayers = this.players.filter(p => p.chips === 0 && !p.eliminated);
+    if (this.blindIncrease === 'perElimination' && eliminatedPlayers.length > 0) {
+      eliminatedPlayers.forEach(p => p.eliminated = true);
+      this.smallBlind += this.blindIncreaseAmount;
+      this.bigBlind += this.blindIncreaseAmount * 2;
+      this.broadcastAction(`Blinds increased to ${this.smallBlind}/${this.bigBlind}`);
     }
     
+    // Remove eliminated players
+    this.players = this.players.filter(p => p.chips > 0 || !p.eliminated);
+    
     // Check if game should continue
-    const playersWithChips = this.players.filter(p => p.chips > 0);
+    const playersWithChips = this.players.filter(p => p.chips > 0 && !p.disconnected);
     if (playersWithChips.length > 1) {
-      setTimeout(() => this.startNewRound(), 5000);
+      this.gamePhase = 'waiting_next_round';
+      setTimeout(() => {
+        // Re-check in case players disconnected during wait
+        const stillActive = this.players.filter(p => p.chips > 0 && !p.disconnected);
+        if (stillActive.length > 1) {
+          this.startNewRound();
+          // Broadcast new round state
+          this.players.forEach(p => {
+            io.to(p.socketId).emit('gameState', this.getGameState(p.socketId));
+          });
+          this.spectators.forEach(s => {
+            io.to(s.socketId).emit('gameState', this.getGameState(s.socketId));
+          });
+        } else {
+          this.gamePhase = 'ended';
+        }
+      }, 5000);
     } else {
       this.gamePhase = 'ended';
+      if (playersWithChips.length === 1) {
+        this.broadcastAction(`${playersWithChips[0].username} wins the tournament!`);
+      }
     }
   }
   
@@ -527,7 +565,12 @@ class Table {
     const player = this.getPlayer(socketId);
     const isSpectator = this.spectators.some(s => s.socketId === socketId);
     const activePlayers = this.players.filter(p => !p.folded && !p.disconnected && p.chips >= 0);
-    const currentPlayerSocketId = activePlayers.length > 0 ? activePlayers[this.currentPlayerIndex]?.socketId : null;
+    
+    // Find current player's socketId
+    let currentPlayerSocketId = null;
+    if (this.currentPlayerIndex >= 0 && this.currentPlayerIndex < this.players.length) {
+      currentPlayerSocketId = this.players[this.currentPlayerIndex]?.socketId;
+    }
     
     return {
       ...this.getPublicState(),
@@ -543,7 +586,8 @@ class Table {
       playerCards: player ? player.cards : null,
       isHost: socketId === this.hostId,
       isSpectator,
-      actionLog: this.actionLog || []
+      actionLog: this.actionLog || [],
+      mySocketId: socketId
     };
   }
 }
@@ -689,30 +733,42 @@ io.on('connection', (socket) => {
     if (tableId) {
       const table = tables.get(tableId);
       if (table) {
+        // If host disconnects, close the table immediately
+        if (socket.id === table.hostId) {
+          io.to(tableId).emit('tableClosed', 'Host has left the game');
+          tables.delete(tableId);
+          // Clear all player sockets for this table
+          Array.from(playerSockets.entries()).forEach(([sid, tid]) => {
+            if (tid === tableId) playerSockets.delete(sid);
+          });
+          return;
+        }
+        
         const player = table.getPlayer(socket.id);
         if (player) {
           player.disconnected = true;
           
-          // If host disconnects, close the table
-          if (socket.id === table.hostId) {
-            tables.delete(tableId);
-            io.to(tableId).emit('tableClosed');
-            return;
-          }
-          
-          // Set disconnect timer
+          // Set disconnect timer (5 minutes)
           const timer = setTimeout(() => {
             table.removePlayer(socket.id);
-            // Send personalized game state to remaining players
-            table.players.forEach(p => {
-              io.to(p.socketId).emit('gameState', table.getGameState(p.socketId));
-            });
-            table.spectators.forEach(s => {
-              io.to(s.socketId).emit('gameState', table.getGameState(s.socketId));
-            });
-          }, 300000); // 5 minutes
+            playerSockets.delete(socket.id);
+            
+            // Check if table should be closed (no players left)
+            if (table.players.length === 0 && table.spectators.length === 0) {
+              tables.delete(tableId);
+            } else {
+              // Send personalized game state to remaining players
+              table.players.forEach(p => {
+                io.to(p.socketId).emit('gameState', table.getGameState(p.socketId));
+              });
+              table.spectators.forEach(s => {
+                io.to(s.socketId).emit('gameState', table.getGameState(s.socketId));
+              });
+            }
+          }, 300000);
           
           table.disconnectTimers.set(socket.id, timer);
+          
           // Send personalized game state to remaining players
           table.players.forEach(p => {
             io.to(p.socketId).emit('gameState', table.getGameState(p.socketId));
@@ -720,10 +776,49 @@ io.on('connection', (socket) => {
           table.spectators.forEach(s => {
             io.to(s.socketId).emit('gameState', table.getGameState(s.socketId));
           });
+        } else {
+          // Spectator disconnected
+          table.spectators = table.spectators.filter(s => s.socketId !== socket.id);
         }
       }
       playerSockets.delete(socket.id);
     }
+  });
+  
+  socket.on('leaveTable', () => {
+    const tableId = playerSockets.get(socket.id);
+    if (tableId) {
+      const table = tables.get(tableId);
+      if (table) {
+        // If host leaves, close the table
+        if (socket.id === table.hostId) {
+          io.to(tableId).emit('tableClosed', 'Host has closed the table');
+          tables.delete(tableId);
+          // Clear all player sockets for this table
+          Array.from(playerSockets.entries()).forEach(([sid, tid]) => {
+            if (tid === tableId) playerSockets.delete(sid);
+          });
+        } else {
+          table.removePlayer(socket.id);
+          socket.leave(tableId);
+          
+          // Check if table should be closed
+          if (table.players.length === 0 && table.spectators.length === 0) {
+            tables.delete(tableId);
+          } else {
+            // Send personalized game state to remaining players
+            table.players.forEach(p => {
+              io.to(p.socketId).emit('gameState', table.getGameState(p.socketId));
+            });
+            table.spectators.forEach(s => {
+              io.to(s.socketId).emit('gameState', table.getGameState(s.socketId));
+            });
+          }
+        }
+      }
+      playerSockets.delete(socket.id);
+    }
+    socket.emit('leftTable');
   });
 });
 
