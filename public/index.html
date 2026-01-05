@@ -171,10 +171,20 @@
             transition: all 0.3s ease;
         }
         
+        .player-card.my-player {
+            border-color: #00ffff;
+            box-shadow: 0 0 15px rgba(0, 255, 255, 0.5);
+        }
+        
         .player-card.active-turn {
             border-color: #00ff00;
             box-shadow: 0 0 20px rgba(0, 255, 0, 0.6);
             animation: pulse 1.5s infinite;
+        }
+        
+        .player-card.my-player.active-turn {
+            border-color: #00ff00;
+            box-shadow: 0 0 20px rgba(0, 255, 0, 0.8), 0 0 10px rgba(0, 255, 255, 0.5);
         }
         
         @keyframes pulse {
@@ -622,7 +632,7 @@
                 <div class="btn-group">
                     <button id="startGameBtn" onclick="startGame()">Start Game</button>
                     <button onclick="pauseGame()">Pause/Resume</button>
-                    <button onclick="showScreen('mainMenu')">Leave Table</button>
+                    <button onclick="leaveTable()">Leave Table</button>
                 </div>
             </div>
             
@@ -917,6 +927,23 @@
         function pauseGame() {
             socket.emit('pauseGame');
         }
+        
+        function leaveTable() {
+            if (confirm('Are you sure you want to leave the table?')) {
+                socket.emit('leaveTable');
+            }
+        }
+        
+        socket.on('leftTable', () => {
+            currentTableId = null;
+            showScreen('mainMenu');
+        });
+        
+        socket.on('tableClosed', (reason) => {
+            alert(reason || 'The table has been closed');
+            currentTableId = null;
+            showScreen('mainMenu');
+        });
         
         // Chat
         function sendChat() {
