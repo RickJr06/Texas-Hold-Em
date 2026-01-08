@@ -157,10 +157,10 @@ class Table {
     this.smallBlind = settings.smallBlind;
     this.bigBlind = settings.bigBlind;
     this.turnTimer = settings.turnTimer || 90;
-    this.blindIncrease = settings.blindIncrease || 'none'; // 'none', 'perElimination'
+    this.blindIncrease = settings.blindIncrease || 'none';
     this.blindIncreaseAmount = settings.blindIncreaseAmount || 0;
     this.hostDisconnectBehavior = settings.hostDisconnectBehavior || 'pause';
-    this.newPlayerChips = settings.newPlayerChips || 'starting'; // 'starting' or 'lowest'
+    this.newPlayerChips = settings.newPlayerChips || 'starting';
     
     this.players = [];
     this.spectators = [];
@@ -170,11 +170,13 @@ class Table {
     this.communityCards = [];
     this.pot = 0;
     this.currentBet = 0;
-    this.dealerIndex = 0;
-    this.currentPlayerIndex = 0;
+    this.minRaise = 0;
+    this.dealerPosition = -1; // Index in players array
+    this.currentTurnPosition = -1;
     this.gamePhase = 'waiting'; // waiting, preflop, flop, turn, river, showdown
     this.turnTimeout = null;
     this.disconnectTimers = new Map();
+    this.actionLog = [];
   }
   
   addPlayer(socketId, username, isSpectator = false) {
@@ -187,7 +189,7 @@ class Table {
     
     let chips = this.startingChips;
     if (this.gameStarted && this.newPlayerChips === 'lowest') {
-      const activePlayers = this.players.filter(p => !p.folded && p.chips > 0);
+      const activePlayers = this.players.filter(p => p.chips > 0);
       if (activePlayers.length > 0) {
         chips = Math.min(...activePlayers.map(p => p.chips));
       }
@@ -200,8 +202,9 @@ class Table {
       bet: 0,
       folded: false,
       cards: [],
-      active: true,
-      disconnected: false
+      disconnected: false,
+      isAllIn: false,
+      totalBetThisRound: 0
     });
     return true;
   }
@@ -215,320 +218,422 @@ class Table {
     return this.players.find(p => p.socketId === socketId);
   }
   
+  getActivePlayers() {
+    return this.players.filter(p => p.chips > 0 && !p.disconnected);
+  }
+  
+  getPlayersInHand() {
+    return this.players.filter(p => !p.folded && !p.disconnected && p.chips >= 0);
+  }
+  
   startGame() {
-    if (this.players.length < 2) return false;
+    const active = this.getActivePlayers();
+    if (active.length < 2) return false;
+    
     this.gameStarted = true;
-    this.startNewRound();
+    this.dealerPosition = -1; // Will be incremented to 0 on first hand
+    this.startNewHand();
     return true;
   }
   
-  startNewRound() {
+  startNewHand() {
+    const active = this.getActivePlayers();
+    if (active.length < 2) {
+      this.gamePhase = 'ended';
+      if (active.length === 1) {
+        this.broadcastAction(`${active[0].username} wins the tournament!`);
+      }
+      return;
+    }
+    
+    // Reset for new hand
     this.deck.reset();
     this.communityCards = [];
     this.pot = 0;
     this.currentBet = 0;
+    this.minRaise = this.bigBlind;
     this.gamePhase = 'preflop';
-    this.lastRaiseAmount = 0;
+    this.actionLog = [];
     
-    // Get list of active players (has chips, not disconnected) BEFORE resetting
-    const activePlayers = this.players.filter(p => p.chips > 0 && !p.disconnected);
-    if (activePlayers.length < 2) {
-      this.gamePhase = 'ended';
-      return;
-    }
-    
-    // Reset player states
     this.players.forEach(p => {
       p.bet = 0;
       p.folded = false;
       p.cards = [];
-      p.hasActed = false;
-      p.lastAction = null;
+      p.isAllIn = false;
+      p.totalBetThisRound = 0;
+      p.hasActedThisRound = false;
     });
     
-    // Find current dealer in active players list
-    let dealerInActive = activePlayers.findIndex(p => p.socketId === this.players[this.dealerIndex]?.socketId);
-    if (dealerInActive === -1) dealerInActive = 0;
+    // Move dealer button to next active player
+    this.dealerPosition = this.getNextActivePosition(this.dealerPosition);
     
-    // Move dealer to next active player
-    dealerInActive = (dealerInActive + 1) % activePlayers.length;
-    
-    // Update global dealer index to match
-    this.dealerIndex = this.players.findIndex(p => p.socketId === activePlayers[dealerInActive].socketId);
-    
-    // Deal cards to active players only
-    activePlayers.forEach(p => {
+    // Deal 2 cards to each active player
+    active.forEach(p => {
       p.cards = [this.deck.deal(), this.deck.deal()];
     });
     
     // Post blinds
-    const sbPlayer = activePlayers[(dealerInActive + 1) % activePlayers.length];
-    const bbPlayer = activePlayers[(dealerInActive + 2) % activePlayers.length];
+    const isHeadsUp = active.length === 2;
+    let sbPosition, bbPosition, firstToActPosition;
     
-    this.placeBet(sbPlayer, this.smallBlind);
-    this.placeBet(bbPlayer, this.bigBlind);
-    this.currentBet = this.bigBlind;
-    
-    // Set first player to act
-    let firstToAct;
-    if (activePlayers.length === 2) {
-      // Heads-up: dealer (small blind) acts first preflop
-      firstToAct = activePlayers[dealerInActive];
+    if (isHeadsUp) {
+      // Heads-up: dealer is SB, other player is BB
+      sbPosition = this.dealerPosition;
+      bbPosition = this.getNextActivePosition(sbPosition);
+      firstToActPosition = sbPosition; // SB acts first preflop in heads-up
     } else {
-      // Multi-way: UTG (left of big blind) acts first
-      firstToAct = activePlayers[(dealerInActive + 3) % activePlayers.length];
+      // Multi-way: SB left of dealer, BB left of SB
+      sbPosition = this.getNextActivePosition(this.dealerPosition);
+      bbPosition = this.getNextActivePosition(sbPosition);
+      firstToActPosition = this.getNextActivePosition(bbPosition); // UTG
     }
     
-    this.currentPlayerIndex = this.players.findIndex(p => p.socketId === firstToAct.socketId);
+    // Post small blind
+    const sbPlayer = this.players[sbPosition];
+    const sbAmount = Math.min(this.smallBlind, sbPlayer.chips);
+    sbPlayer.chips -= sbAmount;
+    sbPlayer.bet = sbAmount;
+    sbPlayer.totalBetThisRound = sbAmount;
+    this.pot += sbAmount;
+    if (sbPlayer.chips === 0) sbPlayer.isAllIn = true;
+    
+    // Post big blind
+    const bbPlayer = this.players[bbPosition];
+    const bbAmount = Math.min(this.bigBlind, bbPlayer.chips);
+    bbPlayer.chips -= bbAmount;
+    bbPlayer.bet = bbAmount;
+    bbPlayer.totalBetThisRound = bbAmount;
+    this.pot += bbAmount;
+    this.currentBet = bbAmount;
+    if (bbPlayer.chips === 0) bbPlayer.isAllIn = true;
+    
+    this.broadcastAction(`${sbPlayer.username} posts small blind $${sbAmount}`);
+    this.broadcastAction(`${bbPlayer.username} posts big blind $${bbAmount}`);
+    
+    // Set first player to act
+    this.currentTurnPosition = firstToActPosition;
     this.startTurnTimer();
   }
   
-  placeBet(player, amount) {
-    const actualBet = Math.min(amount, player.chips);
-    player.chips -= actualBet;
-    player.bet += actualBet;
-    this.pot += actualBet;
-    return actualBet;
+  getNextActivePosition(fromPosition) {
+    const active = this.getActivePlayers();
+    if (active.length === 0) return -1;
+    
+    let attempts = 0;
+    let pos = (fromPosition + 1) % this.players.length;
+    
+    while (attempts < this.players.length) {
+      const player = this.players[pos];
+      if (player.chips > 0 && !player.disconnected) {
+        return pos;
+      }
+      pos = (pos + 1) % this.players.length;
+      attempts++;
+    }
+    
+    return -1;
   }
   
   playerAction(socketId, action, amount = 0) {
     const player = this.getPlayer(socketId);
-    if (!player || player.folded || this.paused) return false;
+    if (!player || player.folded || player.isAllIn || this.paused) return false;
     
-    const activePlayers = this.players.filter(p => p.chips > 0 && !p.folded && !p.disconnected);
-    const currentPlayer = activePlayers[this.currentPlayerIndex];
-    if (!currentPlayer || currentPlayer.socketId !== socketId) return false;
+    // Verify it's this player's turn
+    if (this.players[this.currentTurnPosition]?.socketId !== socketId) return false;
     
     this.clearTurnTimer();
     
     let actionMessage = '';
+    const callAmount = this.currentBet - player.bet;
     
     switch (action) {
       case 'fold':
         player.folded = true;
-        actionMessage = `${player.username} folded`;
+        actionMessage = `${player.username} folds`;
         break;
+        
       case 'check':
-        if (player.bet < this.currentBet) return false;
-        actionMessage = `${player.username} checked`;
+        if (player.bet < this.currentBet) return false; // Can't check if there's a bet to call
+        player.hasActedThisRound = true;
+        actionMessage = `${player.username} checks`;
         break;
+        
       case 'call':
-        const callAmount = Math.min(this.currentBet - player.bet, player.chips);
-        this.placeBet(player, callAmount);
-        actionMessage = `${player.username} called ${callAmount}`;
+        const actualCall = Math.min(callAmount, player.chips);
+        player.chips -= actualCall;
+        player.bet += actualCall;
+        player.totalBetThisRound += actualCall;
+        this.pot += actualCall;
+        player.hasActedThisRound = true;
+        
+        if (player.chips === 0) {
+          player.isAllIn = true;
+          actionMessage = `${player.username} calls $${actualCall} (all-in)`;
+        } else {
+          actionMessage = `${player.username} calls $${actualCall}`;
+        }
         break;
+        
       case 'raise':
-        // Validate raise amount
-        if (amount > player.chips + player.bet) return false;
-        if (amount < this.currentBet * 2 && player.chips + player.bet > this.currentBet * 2) return false;
+        // Validate raise
+        if (amount <= this.currentBet) return false; // Must raise higher than current bet
+        if (amount - this.currentBet < this.minRaise && player.chips + player.bet > amount) {
+          return false; // Must raise by at least minRaise (unless all-in)
+        }
+        if (amount > player.chips + player.bet) return false; // Can't bet more than you have
         
         const raiseAmount = amount - player.bet;
-        if (raiseAmount <= 0) return false;
+        player.chips -= raiseAmount;
+        player.bet = amount;
+        player.totalBetThisRound += raiseAmount;
+        this.pot += raiseAmount;
         
-        const oldBet = this.currentBet;
-        this.placeBet(player, raiseAmount);
+        // Update min raise for next raise (must raise by at least this much)
+        this.minRaise = amount - this.currentBet;
         this.currentBet = amount;
-        actionMessage = `${player.username} raised from ${oldBet} to ${amount}`;
         
-        // Reset hasActed for all other players
+        // Reset hasActed for all other players (they need to respond to the raise)
         this.players.forEach(p => {
-          if (p.socketId !== socketId) p.hasActed = false;
+          if (p.socketId !== socketId && !p.folded && !p.isAllIn) {
+            p.hasActedThisRound = false;
+          }
         });
+        
+        player.hasActedThisRound = true;
+        
+        if (player.chips === 0) {
+          player.isAllIn = true;
+          actionMessage = `${player.username} raises to $${amount} (all-in)`;
+        } else {
+          actionMessage = `${player.username} raises to $${amount}`;
+        }
         break;
+        
       default:
         return false;
     }
     
-    player.hasActed = true;
     player.lastAction = action;
-    
-    // Broadcast action to all players
     this.broadcastAction(actionMessage);
     
-    return this.advanceGame();
-  }
-  
-  broadcastAction(message) {
-    this.actionLog = this.actionLog || [];
-    this.actionLog.push(message);
-  }
-  
-  advanceGame() {
-    // Work with full player list indices, but only consider active players
-    const allPlayers = this.players;
-    const activePlayers = allPlayers.filter(p => !p.folded && !p.disconnected && p.chips >= 0);
+    // Check if hand is over or move to next player
+    const inHand = this.getPlayersInHand();
+    const notFolded = inHand.filter(p => !p.folded);
     
-    // Check if only one player left not folded
-    const playersNotFolded = allPlayers.filter(p => !p.folded && !p.disconnected);
-    if (playersNotFolded.length === 1) {
-      this.endRound(playersNotFolded[0]);
-      return true;
-    }
-    
-    // Check if all players are all-in except one or none
-    const playersWithChips = activePlayers.filter(p => p.chips > 0);
-    if (playersWithChips.length <= 1) {
-      // Skip to showdown - deal remaining cards
-      while (this.gamePhase !== 'showdown' && this.gamePhase !== 'ended') {
-        allPlayers.forEach(p => {
-          p.hasActed = false;
-          p.bet = 0;
-        });
-        this.currentBet = 0;
-        this.lastRaiseAmount = 0;
-        
-        switch (this.gamePhase) {
-          case 'preflop':
-            this.gamePhase = 'flop';
-            this.communityCards.push(this.deck.deal(), this.deck.deal(), this.deck.deal());
-            break;
-          case 'flop':
-            this.gamePhase = 'turn';
-            this.communityCards.push(this.deck.deal());
-            break;
-          case 'turn':
-            this.gamePhase = 'river';
-            this.communityCards.push(this.deck.deal());
-            break;
-          case 'river':
-            this.gamePhase = 'showdown';
-            this.determineWinner();
-            return true;
-        }
-      }
+    if (notFolded.length === 1) {
+      // Everyone else folded, hand is over
+      this.endHand(notFolded[0]);
       return true;
     }
     
     // Check if betting round is complete
-    const playersToAct = activePlayers.filter(p => p.chips > 0 && (!p.hasActed || p.bet < this.currentBet));
-    
-    if (playersToAct.length === 0) {
-      // Move to next phase
-      allPlayers.forEach(p => {
-        p.hasActed = false;
-        p.bet = 0;
-      });
-      this.currentBet = 0;
-      this.lastRaiseAmount = 0;
-      
-      switch (this.gamePhase) {
-        case 'preflop':
-          this.gamePhase = 'flop';
-          this.communityCards.push(this.deck.deal(), this.deck.deal(), this.deck.deal());
-          break;
-        case 'flop':
-          this.gamePhase = 'turn';
-          this.communityCards.push(this.deck.deal());
-          break;
-        case 'turn':
-          this.gamePhase = 'river';
-          this.communityCards.push(this.deck.deal());
-          break;
-        case 'river':
-          this.gamePhase = 'showdown';
-          this.determineWinner();
-          return true;
-      }
-      
-      // First player to act is first active player left of dealer
-      for (let i = 1; i <= allPlayers.length; i++) {
-        const idx = (this.dealerIndex + i) % allPlayers.length;
-        const player = allPlayers[idx];
-        if (!player.folded && !player.disconnected && player.chips > 0) {
-          this.currentPlayerIndex = idx;
-          break;
-        }
-      }
+    if (this.isBettingRoundComplete()) {
+      this.advanceToNextStreet();
     } else {
-      // Move to next player who can act
-      let attempts = 0;
-      const startIdx = this.currentPlayerIndex;
-      do {
-        this.currentPlayerIndex = (this.currentPlayerIndex + 1) % allPlayers.length;
-        attempts++;
-        const currentPlayer = allPlayers[this.currentPlayerIndex];
-        
-        // Found a valid player
-        if (!currentPlayer.folded && !currentPlayer.disconnected && 
-            currentPlayer.chips > 0 && 
-            (!currentPlayer.hasActed || currentPlayer.bet < this.currentBet)) {
-          break;
-        }
-      } while (attempts < allPlayers.length);
+      this.moveToNextPlayer();
     }
     
-    this.startTurnTimer();
     return true;
   }
   
-  determineWinner() {
-    const activePlayers = this.players.filter(p => !p.folded && !p.disconnected);
+  isBettingRoundComplete() {
+    const inHand = this.getPlayersInHand();
+    const canAct = inHand.filter(p => !p.folded && !p.isAllIn);
     
-    const results = activePlayers.map(p => {
-      const hand = PokerHand.rankHand([...p.cards, ...this.communityCards]);
-      return { player: p, hand };
-    });
+    // Everyone all-in or folded
+    if (canAct.length === 0) return true;
     
-    results.sort((a, b) => b.hand.score - a.hand.score);
-    const winner = results[0].player;
+    // Check if all players who can act have acted and matched the current bet
+    for (const player of canAct) {
+      if (!player.hasActedThisRound || player.bet < this.currentBet) {
+        return false;
+      }
+    }
     
-    this.endRound(winner);
+    return true;
   }
   
-  endRound(winner) {
+  moveToNextPlayer() {
+    let attempts = 0;
+    
+    while (attempts < this.players.length) {
+      this.currentTurnPosition = (this.currentTurnPosition + 1) % this.players.length;
+      const player = this.players[this.currentTurnPosition];
+      
+      // Found next player who can act
+      if (!player.folded && !player.disconnected && !player.isAllIn && player.chips > 0) {
+        this.startTurnTimer();
+        return;
+      }
+      
+      attempts++;
+    }
+    
+    // No one can act, advance to next street
+    this.advanceToNextStreet();
+  }
+  
+  advanceToNextStreet() {
+    // Reset for next betting round
+    this.players.forEach(p => {
+      p.bet = 0;
+      p.hasActedThisRound = false;
+    });
+    this.currentBet = 0;
+    this.minRaise = this.bigBlind;
+    
+    const inHand = this.getPlayersInHand();
+    const notFolded = inHand.filter(p => !p.folded);
+    const canAct = notFolded.filter(p => !p.isAllIn && p.chips > 0);
+    
+    // If only 0-1 players can act, deal all remaining cards and go to showdown
+    if (canAct.length <= 1) {
+      while (this.gamePhase !== 'showdown') {
+        this.dealNextStreet();
+      }
+      this.determineWinner();
+      return;
+    }
+    
+    // Deal next street
+    this.dealNextStreet();
+    
+    if (this.gamePhase === 'showdown') {
+      this.determineWinner();
+      return;
+    }
+    
+    // First to act is first active player left of dealer
+    this.currentTurnPosition = this.getNextActivePosition(this.dealerPosition);
+    
+    // Skip players who are folded or all-in
+    while (this.currentTurnPosition !== -1) {
+      const player = this.players[this.currentTurnPosition];
+      if (!player.folded && !player.isAllIn && player.chips > 0) {
+        break;
+      }
+      this.currentTurnPosition = this.getNextActivePosition(this.currentTurnPosition);
+    }
+    
+    this.startTurnTimer();
+  }
+  
+  dealNextStreet() {
+    switch (this.gamePhase) {
+      case 'preflop':
+        this.gamePhase = 'flop';
+        this.communityCards.push(this.deck.deal(), this.deck.deal(), this.deck.deal());
+        this.broadcastAction('Flop: ' + this.communityCards.map(c => this.cardToString(c)).join(' '));
+        break;
+      case 'flop':
+        this.gamePhase = 'turn';
+        this.communityCards.push(this.deck.deal());
+        this.broadcastAction('Turn: ' + this.cardToString(this.communityCards[3]));
+        break;
+      case 'turn':
+        this.gamePhase = 'river';
+        this.communityCards.push(this.deck.deal());
+        this.broadcastAction('River: ' + this.cardToString(this.communityCards[4]));
+        break;
+      case 'river':
+        this.gamePhase = 'showdown';
+        break;
+    }
+  }
+  
+  cardToString(card) {
+    const suits = { hearts: '♥', diamonds: '♦', clubs: '♣', spades: '♠' };
+    const values = { 11: 'J', 12: 'Q', 13: 'K', 14: 'A' };
+    return (values[card.value] || card.value) + suits[card.suit];
+  }
+  
+  determineWinner() {
+    const inHand = this.getPlayersInHand().filter(p => !p.folded);
+    
+    if (inHand.length === 0) return;
+    if (inHand.length === 1) {
+      this.endHand(inHand[0]);
+      return;
+    }
+    
+    // Evaluate hands
+    const results = inHand.map(p => ({
+      player: p,
+      hand: PokerHand.rankHand([...p.cards, ...this.communityCards]),
+    }));
+    
+    results.sort((a, b) => b.hand.score - a.hand.score);
+    
+    // Check for ties
+    const winners = [results[0]];
+    for (let i = 1; i < results.length; i++) {
+      if (results[i].hand.score === results[0].hand.score) {
+        winners.push(results[i]);
+      } else {
+        break;
+      }
+    }
+    
+    if (winners.length === 1) {
+      const winner = winners[0].player;
+      const handName = PokerHand.getHandName(winners[0].hand.rank);
+      this.broadcastAction(`${winner.username} wins $${this.pot} with ${handName}`);
+      this.endHand(winner);
+    } else {
+      // Split pot
+      const splitAmount = Math.floor(this.pot / winners.length);
+      winners.forEach(w => {
+        w.player.chips += splitAmount;
+        this.broadcastAction(`${w.player.username} wins $${splitAmount} (split pot)`);
+      });
+      this.scheduleNextHand();
+    }
+  }
+  
+  endHand(winner) {
     winner.chips += this.pot;
-    this.broadcastAction(`${winner.username} wins ${this.pot}!`);
-    
-    // Clear action log for next round
-    this.actionLog = [];
-    
+    this.scheduleNextHand();
+  }
+  
+  scheduleNextHand() {
     // Check for blind increase
-    const eliminatedPlayers = this.players.filter(p => p.chips === 0 && !p.eliminated);
-    if (this.blindIncrease === 'perElimination' && eliminatedPlayers.length > 0) {
-      eliminatedPlayers.forEach(p => p.eliminated = true);
+    const eliminated = this.players.filter(p => p.chips === 0 && !p.eliminated);
+    if (this.blindIncrease === 'perElimination' && eliminated.length > 0) {
+      eliminated.forEach(p => p.eliminated = true);
       this.smallBlind += this.blindIncreaseAmount;
-      this.bigBlind += this.blindIncreaseAmount * 2;
-      this.broadcastAction(`Blinds increased to ${this.smallBlind}/${this.bigBlind}`);
+      this.bigBlind = this.smallBlind * 2;
+      this.broadcastAction(`Blinds increased to $${this.smallBlind}/$${this.bigBlind}`);
     }
     
     // Remove eliminated players
-    this.players = this.players.filter(p => p.chips > 0 || !p.eliminated);
+    this.players = this.players.filter(p => p.chips > 0);
     
-    // Check if game should continue
-    const playersWithChips = this.players.filter(p => p.chips > 0 && !p.disconnected);
-    if (playersWithChips.length > 1) {
-      this.gamePhase = 'waiting_next_round';
-      setTimeout(() => {
-        // Re-check in case players disconnected during wait
-        const stillActive = this.players.filter(p => p.chips > 0 && !p.disconnected);
-        if (stillActive.length > 1) {
-          this.startNewRound();
-          // Broadcast new round state
-          this.players.forEach(p => {
-            io.to(p.socketId).emit('gameState', this.getGameState(p.socketId));
-          });
-          this.spectators.forEach(s => {
-            io.to(s.socketId).emit('gameState', this.getGameState(s.socketId));
-          });
-        } else {
-          this.gamePhase = 'ended';
-        }
-      }, 5000);
-    } else {
+    const active = this.getActivePlayers();
+    if (active.length < 2) {
       this.gamePhase = 'ended';
-      if (playersWithChips.length === 1) {
-        this.broadcastAction(`${playersWithChips[0].username} wins the tournament!`);
+      if (active.length === 1) {
+        this.broadcastAction(`${active[0].username} wins the tournament!`);
       }
+      return;
     }
+    
+    this.gamePhase = 'waiting_next_hand';
+    setTimeout(() => {
+      if (this.getActivePlayers().length >= 2) {
+        this.startNewHand();
+        this.broadcastGameState();
+      }
+    }, 5000);
   }
   
   startTurnTimer() {
     this.clearTurnTimer();
     this.turnTimeout = setTimeout(() => {
-      const activePlayers = this.players.filter(p => !p.folded && !p.disconnected && p.chips >= 0);
-      if (activePlayers.length > 0) {
-        const currentPlayer = activePlayers[this.currentPlayerIndex];
-        this.playerAction(currentPlayer.socketId, 'fold');
+      const player = this.players[this.currentTurnPosition];
+      if (player && !player.folded && !player.isAllIn) {
+        // Auto-fold on timeout
+        this.playerAction(player.socketId, 'fold');
+        this.broadcastGameState();
       }
     }, this.turnTimer * 1000);
   }
@@ -538,6 +643,19 @@ class Table {
       clearTimeout(this.turnTimeout);
       this.turnTimeout = null;
     }
+  }
+  
+  broadcastAction(message) {
+    this.actionLog.push(message);
+  }
+  
+  broadcastGameState() {
+    this.players.forEach(p => {
+      io.to(p.socketId).emit('gameState', this.getGameState(p.socketId));
+    });
+    this.spectators.forEach(s => {
+      io.to(s.socketId).emit('gameState', this.getGameState(s.socketId));
+    });
   }
   
   getPublicState() {
@@ -550,8 +668,8 @@ class Table {
         chips: p.chips,
         bet: p.bet,
         folded: p.folded,
-        active: p.active,
         disconnected: p.disconnected,
+        isAllIn: p.isAllIn,
         lastAction: p.lastAction
       })),
       spectatorCount: this.spectators.length,
@@ -564,12 +682,10 @@ class Table {
   getGameState(socketId) {
     const player = this.getPlayer(socketId);
     const isSpectator = this.spectators.some(s => s.socketId === socketId);
-    const activePlayers = this.players.filter(p => !p.folded && !p.disconnected && p.chips >= 0);
     
-    // Find current player's socketId
     let currentPlayerSocketId = null;
-    if (this.currentPlayerIndex >= 0 && this.currentPlayerIndex < this.players.length) {
-      currentPlayerSocketId = this.players[this.currentPlayerIndex]?.socketId;
+    if (this.currentTurnPosition >= 0 && this.currentTurnPosition < this.players.length) {
+      currentPlayerSocketId = this.players[this.currentTurnPosition]?.socketId;
     }
     
     return {
@@ -578,15 +694,14 @@ class Table {
       pot: this.pot,
       currentBet: this.currentBet,
       gamePhase: this.gamePhase,
-      dealerIndex: this.dealerIndex,
-      currentPlayerIndex: this.currentPlayerIndex,
+      dealerIndex: this.dealerPosition,
       currentPlayerSocketId,
       smallBlind: this.smallBlind,
       bigBlind: this.bigBlind,
       playerCards: player ? player.cards : null,
       isHost: socketId === this.hostId,
       isSpectator,
-      actionLog: this.actionLog || [],
+      actionLog: this.actionLog,
       mySocketId: socketId
     };
   }
@@ -622,13 +737,7 @@ io.on('connection', (socket) => {
     if (table.addPlayer(socket.id, username, isSpectator)) {
       socket.join(tableId);
       playerSockets.set(socket.id, tableId);
-      // Send personalized game state to each player
-      table.players.forEach(p => {
-        io.to(p.socketId).emit('gameState', table.getGameState(p.socketId));
-      });
-      table.spectators.forEach(s => {
-        io.to(s.socketId).emit('gameState', table.getGameState(s.socketId));
-      });
+      table.broadcastGameState();
       socket.emit('joinedTable', { tableId });
     } else {
       socket.emit('error', 'Table is full');
@@ -640,13 +749,7 @@ io.on('connection', (socket) => {
     const table = tables.get(tableId);
     if (table && table.hostId === socket.id) {
       if (table.startGame()) {
-        // Send personalized game state to each player
-        table.players.forEach(p => {
-          io.to(p.socketId).emit('gameState', table.getGameState(p.socketId));
-        });
-        table.spectators.forEach(s => {
-          io.to(s.socketId).emit('gameState', table.getGameState(s.socketId));
-        });
+        table.broadcastGameState();
       }
     }
   });
@@ -655,13 +758,7 @@ io.on('connection', (socket) => {
     const tableId = playerSockets.get(socket.id);
     const table = tables.get(tableId);
     if (table && table.playerAction(socket.id, action, amount)) {
-      // Send personalized game state to each player
-      table.players.forEach(p => {
-        io.to(p.socketId).emit('gameState', table.getGameState(p.socketId));
-      });
-      table.spectators.forEach(s => {
-        io.to(s.socketId).emit('gameState', table.getGameState(s.socketId));
-      });
+      table.broadcastGameState();
     }
   });
   
@@ -700,13 +797,7 @@ io.on('connection', (socket) => {
     if (table && table.hostId === socket.id) {
       table.removePlayer(targetSocketId);
       io.to(targetSocketId).emit('kicked');
-      // Send personalized game state to each player
-      table.players.forEach(p => {
-        io.to(p.socketId).emit('gameState', table.getGameState(p.socketId));
-      });
-      table.spectators.forEach(s => {
-        io.to(s.socketId).emit('gameState', table.getGameState(s.socketId));
-      });
+      table.broadcastGameState();
     }
   });
   
@@ -717,14 +808,35 @@ io.on('connection', (socket) => {
       table.paused = !table.paused;
       if (table.paused) table.clearTurnTimer();
       else table.startTurnTimer();
-      // Send personalized game state to each player
-      table.players.forEach(p => {
-        io.to(p.socketId).emit('gameState', table.getGameState(p.socketId));
-      });
-      table.spectators.forEach(s => {
-        io.to(s.socketId).emit('gameState', table.getGameState(s.socketId));
-      });
+      table.broadcastGameState();
     }
+  });
+  
+  socket.on('leaveTable', () => {
+    const tableId = playerSockets.get(socket.id);
+    if (tableId) {
+      const table = tables.get(tableId);
+      if (table) {
+        if (socket.id === table.hostId) {
+          io.to(tableId).emit('tableClosed', 'Host has closed the table');
+          tables.delete(tableId);
+          Array.from(playerSockets.entries()).forEach(([sid, tid]) => {
+            if (tid === tableId) playerSockets.delete(sid);
+          });
+        } else {
+          table.removePlayer(socket.id);
+          socket.leave(tableId);
+          
+          if (table.players.length === 0 && table.spectators.length === 0) {
+            tables.delete(tableId);
+          } else {
+            table.broadcastGameState();
+          }
+        }
+      }
+      playerSockets.delete(socket.id);
+    }
+    socket.emit('leftTable');
   });
   
   socket.on('disconnect', () => {
@@ -733,11 +845,9 @@ io.on('connection', (socket) => {
     if (tableId) {
       const table = tables.get(tableId);
       if (table) {
-        // If host disconnects, close the table immediately
         if (socket.id === table.hostId) {
           io.to(tableId).emit('tableClosed', 'Host has left the game');
           tables.delete(tableId);
-          // Clear all player sockets for this table
           Array.from(playerSockets.entries()).forEach(([sid, tid]) => {
             if (tid === tableId) playerSockets.delete(sid);
           });
@@ -748,77 +858,25 @@ io.on('connection', (socket) => {
         if (player) {
           player.disconnected = true;
           
-          // Set disconnect timer (5 minutes)
           const timer = setTimeout(() => {
             table.removePlayer(socket.id);
             playerSockets.delete(socket.id);
             
-            // Check if table should be closed (no players left)
             if (table.players.length === 0 && table.spectators.length === 0) {
               tables.delete(tableId);
             } else {
-              // Send personalized game state to remaining players
-              table.players.forEach(p => {
-                io.to(p.socketId).emit('gameState', table.getGameState(p.socketId));
-              });
-              table.spectators.forEach(s => {
-                io.to(s.socketId).emit('gameState', table.getGameState(s.socketId));
-              });
+              table.broadcastGameState();
             }
           }, 300000);
           
           table.disconnectTimers.set(socket.id, timer);
-          
-          // Send personalized game state to remaining players
-          table.players.forEach(p => {
-            io.to(p.socketId).emit('gameState', table.getGameState(p.socketId));
-          });
-          table.spectators.forEach(s => {
-            io.to(s.socketId).emit('gameState', table.getGameState(s.socketId));
-          });
+          table.broadcastGameState();
         } else {
-          // Spectator disconnected
           table.spectators = table.spectators.filter(s => s.socketId !== socket.id);
         }
       }
       playerSockets.delete(socket.id);
     }
-  });
-  
-  socket.on('leaveTable', () => {
-    const tableId = playerSockets.get(socket.id);
-    if (tableId) {
-      const table = tables.get(tableId);
-      if (table) {
-        // If host leaves, close the table
-        if (socket.id === table.hostId) {
-          io.to(tableId).emit('tableClosed', 'Host has closed the table');
-          tables.delete(tableId);
-          // Clear all player sockets for this table
-          Array.from(playerSockets.entries()).forEach(([sid, tid]) => {
-            if (tid === tableId) playerSockets.delete(sid);
-          });
-        } else {
-          table.removePlayer(socket.id);
-          socket.leave(tableId);
-          
-          // Check if table should be closed
-          if (table.players.length === 0 && table.spectators.length === 0) {
-            tables.delete(tableId);
-          } else {
-            // Send personalized game state to remaining players
-            table.players.forEach(p => {
-              io.to(p.socketId).emit('gameState', table.getGameState(p.socketId));
-            });
-            table.spectators.forEach(s => {
-              io.to(s.socketId).emit('gameState', table.getGameState(s.socketId));
-            });
-          }
-        }
-      }
-      playerSockets.delete(socket.id);
-    }
-    socket.emit('leftTable');
   });
 });
 
